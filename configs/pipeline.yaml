@@ -1,0 +1,103 @@
+project:
+    name: UDPNet
+    colab_mode: false
+    local_root: "."
+    colab_root: "/content/UDPNet"
+
+runtime:
+    device: "cuda:0"
+    # Optional multi-GPU controls (backward-compatible):
+    # gpu_ids: [0, 1]
+    # enable_data_parallel: true
+    num_workers: 2
+    seed: 42
+
+vram:
+    batch_size: 2
+    image_resolution: [640, 640]
+
+paths:
+    datasets_root: "Datasets"
+    organized_root: "Datasets/organized"
+    outputs_root: "outputs"
+
+restoration:
+    enabled: true
+    model_module: "Dehazing.OTS.models.FSNet_UDPNet"
+    build_function: "build_net"
+    checkpoint: "UDPNet_pretrained_(checkpoints)/FSNet_UDPNet_OTS.ckpt"
+    use_depth: true
+    output_index: -1
+    strict_state_dict: false
+
+detection:
+    weights: "weights/yolo/yolo26n.pt"
+    conf_threshold: 0.25
+    nms_iou_threshold: 0.70
+    max_det: 300
+
+evaluation:
+    max_images: 0 # 0 = use all
+    max_visuals: 100
+    map_iou_thresholds: [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+
+normalization:
+    output_label_dir_name: "labels_yolo"
+    skip_unknown_classes: true
+    clamp_boxes: true
+    yolo_txt_assume_normalized: true
+
+datasets:
+    active:
+        - DAWN
+        - RTTS
+
+    scan:
+        link_mode: "copy" # symlink | hardlink | copy
+        overwrite: false
+
+    entries:
+        DAWN:
+            annotation_format: "yolo_txt"
+            root: "Datasets/DAWN"
+            image_dir: "images"
+            label_dir: "labels"
+            split: "all"
+            image_extensions: [".jpg", ".jpeg", ".png", ".bmp", ".webp"]
+            label_extensions: [".txt"]
+            class_map: {}
+
+        RTTS:
+            annotation_format: "voc_xml"
+            root: "Datasets/RTTS"
+            image_dir: "JPEGImages"
+            label_dir: "Annotations"
+            split_file: "ImageSets/Main/test.txt"
+            split: "test"
+            image_extensions: [".jpg", ".jpeg", ".png", ".bmp", ".webp"]
+            label_extensions: [".xml"]
+            class_map:
+                person: 0
+                bicycle: 1
+                car: 2
+                motorbike: 3
+                bus: 4
+
+        # Future dataset plug-in example (no code rewrite needed if VOC/XML or YOLO/TXT):
+        # Foggy_Cityscapes:
+        #   annotation_format: "voc_xml"
+        #   root: "Datasets/Foggy_Cityscapes"
+        #   image_dir: "images"
+        #   label_dir: "annotations"
+        #   split: "all"
+        #   image_extensions: [".jpg", ".png"]
+        #   label_extensions: [".xml"]
+        #   class_map:
+        #     person: 0
+        #     rider: 1
+        #     car: 2
+        #     truck: 3
+        #     bus: 4
+        #     train: 5
+        #     motorbike: 6
+        #     bicycle: 7
