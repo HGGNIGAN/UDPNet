@@ -51,6 +51,7 @@ datasets:
     active:
         - DAWN
         - RTTS
+        - FoggyCityscape
 
     scan:
         link_mode: "copy" # symlink | hardlink | copy
@@ -83,21 +84,20 @@ datasets:
                 motorbike: 3
                 bus: 4
 
-        # Future dataset plug-in example (no code rewrite needed if VOC/XML or YOLO/TXT):
-        # Foggy_Cityscapes:
-        #   annotation_format: "voc_xml"
-        #   root: "Datasets/Foggy_Cityscapes"
-        #   image_dir: "images"
-        #   label_dir: "annotations"
-        #   split: "all"
-        #   image_extensions: [".jpg", ".png"]
-        #   label_extensions: [".xml"]
-        #   class_map:
-        #     person: 0
-        #     rider: 1
-        #     car: 2
-        #     truck: 3
-        #     bus: 4
-        #     train: 5
-        #     motorbike: 6
-        #     bicycle: 7
+        FoggyCityscape:
+            annotation_format: "voc_xml"
+            root: "Datasets/FoggyCityscape"
+            image_dir: "images"
+            label_dir: "labels_raw"
+            split: "refined_trainval"
+            image_extensions: [".png"]
+            label_extensions: [".xml"]
+            class_map:
+                person: 0
+                rider: 1
+                car: 2
+                truck: 3
+                bus: 4
+                train: 5
+                motorbike: 6
+                bicycle: 7
