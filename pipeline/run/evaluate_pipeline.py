@@ -207,6 +207,22 @@ def evaluate_pipeline(
                 for name in dataset_names:
                         per_dataset_max[name] = default_max
 
+        # If DAWN has a scalar max > 0, split evenly across known hazards
+        if "DAWN" in per_dataset_max:
+                v = per_dataset_max["DAWN"]
+                try:
+                        v_int = int(v)
+                except Exception:
+                        v_int = 0
+                if v_int > 0:
+                        num_h = len(_DAWN_HAZARDS)
+                        base = v_int // num_h
+                        rem = v_int % num_h
+                        per_dataset_max["DAWN"] = {
+                                hazard: base + (1 if idx < rem else 0)
+                                for idx, hazard in enumerate(_DAWN_HAZARDS)
+                        }
+
         for batch in dataloader:
                 if processed >= max_images:
                         break
@@ -263,6 +279,7 @@ def evaluate_pipeline(
                         image_ids=batch["image_id"],
                         original_images=original_np,
                         restored_images=restored_np,
+                        baseline_predictions=baseline_pred_np,
                         restored_predictions=restored_pred_np,
                         per_dataset_max=per_dataset_max,
                         per_dataset_saved=per_dataset_saved,
