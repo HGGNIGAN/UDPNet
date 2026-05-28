@@ -24,18 +24,18 @@ The high-level flow is:
 
 Recommended script order:
 
-1. `scripts/step3_scan_datasets.py`
-2. `scripts/step4_normalize_gt.py`
-3. `scripts/step5_generate_depthmaps.py`
-4. `scripts/step7_evaluate_pipeline.py`
+1. `scripts/step1_scan_datasets.py`
+2. `scripts/step2_normalize_gt.py`
+3. `scripts/step3_generate_depthmaps.py`
+4. `scripts/step4_evaluate_pipeline.py`
 
 FoggyCityscape uses one extra handoff step before the pipeline:
 
 1. `scripts/extract_foggycityscape.py`
-2. `scripts/step3_scan_datasets.py`
-3. `scripts/step4_normalize_gt.py`
-4. `scripts/step5_generate_depthmaps.py`
-5. `scripts/step7_evaluate_pipeline.py`
+2. `scripts/step1_scan_datasets.py`
+3. `scripts/step2_normalize_gt.py`
+4. `scripts/step3_generate_depthmaps.py`
+5. `scripts/step4_evaluate_pipeline.py`
 
 The extractor is standalone. It reads the raw FoggyCityscape dataset, selects a deterministic city-balanced subset, converts polygon JSON to VOC XML boxes, and writes a flat extracted tree under `Datasets/extracted/FoggyCityscape`. The main pipeline then consumes that extracted tree only.
 
@@ -337,7 +337,7 @@ Then run the existing pipeline stages against `Datasets/extracted/FoggyCityscape
 
 ## 3. Script-by-Script Guide (`scripts/`)
 
-### 3.1 `scripts/step3_scan_datasets.py`
+### 3.1 `scripts/step1_scan_datasets.py`
 
 Purpose:
 
@@ -355,7 +355,7 @@ CLI:
 - `--overwrite`
 - `--dry-run`
 
-### 3.2 `scripts/step4_normalize_gt.py`
+### 3.2 `scripts/step2_normalize_gt.py`
 
 Purpose:
 
@@ -371,7 +371,7 @@ CLI:
 - `--datasets`
 - `--overwrite`
 
-### 3.3 `scripts/step5_generate_depthmaps.py`
+### 3.3 `scripts/step3_generate_depthmaps.py`
 
 Purpose:
 
@@ -404,7 +404,7 @@ Outputs:
 - Depth images mirrored by relative path into output dir.
 - Prints summary: `processed`, `skipped`, `failed`.
 
-### 3.5 `scripts/step7_evaluate_pipeline.py`
+### 3.5 `scripts/step4_evaluate_pipeline.py`
 
 Purpose:
 
@@ -654,25 +654,25 @@ End-to-end workflow:
 1. Scan and pair:
 
 ```bash
-python scripts/step3_scan_datasets.py --config configs/pipeline.yaml --datasets DAWN RTTS
+python scripts/step1_scan_datasets.py --config configs/pipeline.yaml --datasets DAWN RTTS
 ```
 
 2. Normalize labels:
 
 ```bash
-python scripts/step4_normalize_gt.py --config configs/pipeline.yaml --datasets DAWN RTTS
+python scripts/step2_normalize_gt.py --config configs/pipeline.yaml --datasets DAWN RTTS
 ```
 
 3. Generate depth maps:
 
 ```bash
-python scripts/step5_generate_depthmaps.py --config configs/pipeline.yaml --datasets DAWN RTTS
+python scripts/step3_generate_depthmaps.py --config configs/pipeline.yaml --datasets DAWN RTTS
 ```
 
 4. Evaluate full pipeline:
 
 ```bash
-python scripts/step7_evaluate_pipeline.py --config configs/pipeline.yaml --datasets DAWN RTTS --run-name eval-rtts-dawn
+python scripts/step4_evaluate_pipeline.py --config configs/pipeline.yaml --datasets DAWN RTTS --run-name eval-rtts-dawn
 ```
 
 ### 5.2 Dry-run checks
@@ -680,19 +680,19 @@ python scripts/step7_evaluate_pipeline.py --config configs/pipeline.yaml --datas
 Step 3 dry-run:
 
 ```bash
-python scripts/step3_scan_datasets.py --config configs/pipeline.yaml --datasets DAWN RTTS --dry-run
+python scripts/step1_scan_datasets.py --config configs/pipeline.yaml --datasets DAWN RTTS --dry-run
 ```
 
 Step 5 dry-run:
 
 ```bash
-python scripts/step5_generate_depthmaps.py --config configs/pipeline.yaml --datasets DAWN RTTS --dry-run
+python scripts/step3_generate_depthmaps.py --config configs/pipeline.yaml --datasets DAWN RTTS --dry-run
 ```
 
 Step 7 dry-run:
 
 ```bash
-python scripts/step7_evaluate_pipeline.py --config configs/pipeline.yaml --datasets DAWN RTTS --max-images 8 --dry-run
+python scripts/step4_evaluate_pipeline.py --config configs/pipeline.yaml --datasets DAWN RTTS --max-images 8 --dry-run
 ```
 
 ## 6. Expected Outputs and Their Meaning

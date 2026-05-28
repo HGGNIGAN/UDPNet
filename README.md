@@ -21,24 +21,23 @@ Two-stage pipeline:
 ### Prerequisites
 
 ```bash
-conda env create -f environment.yml
-conda activate working
+pip install -r requirements.txt
 ```
 
 ### Pipeline Workflow
 
 ```bash
 # 1. Scan and pair datasets
-python scripts/step3_scan_datasets.py
+python scripts/step1_scan_datasets.py
 
 # 2. Normalize annotations to YOLO format
-python scripts/step4_normalize_gt.py
+python scripts/step2_normalize_gt.py
 
 # 3. Generate depth maps (optional, for depth-guided restoration)
-python scripts/step5_generate_depthmaps.py
+python scripts/step3_generate_depthmaps.py
 
 # 4. Run evaluation
-python scripts/step7_evaluate_pipeline.py
+python scripts/step4_evaluate_pipeline.py
 ```
 
 **Special case — FoggyCityscape:**
