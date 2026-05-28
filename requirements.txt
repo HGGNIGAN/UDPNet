@@ -1,0 +1,11 @@
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+numpy
+opencv-python
+pyyaml
+ultralytics
+einops
+torch
+torchvision
+torchaudio
+scikit-image
