@@ -112,15 +112,21 @@ def resolve_runs(run_dir_overrides: Sequence[Path] | None) -> List[Tuple[str, Pa
 
 def parse_sample_overrides(raw_overrides: Sequence[str] | None) -> Dict[SampleKey, str]:
         overrides: Dict[SampleKey, str] = {}
-        for raw_value in raw_overrides or []:
+
+        def process_line(raw_value: str) -> None:
+                raw_value = raw_value.strip()
+                if not raw_value or raw_value.startswith("#"):
+                        return
                 if "=" not in raw_value:
                         raise ValueError(
-                                f"Invalid --sample value: {raw_value!r}. Expected DATASET=FILE or DAWN:HAZARD=FILE."
+                                f"Invalid sample entry: {raw_value!r}. Expected DATASET=FILE or DAWN:HAZARD=FILE."
                         )
                 left, sample_name = raw_value.split("=", 1)
+                left = left.strip()
+                sample_name = sample_name.strip()
                 if not left or not sample_name:
                         raise ValueError(
-                                f"Invalid --sample value: {raw_value!r}. Expected DATASET=FILE or DAWN:HAZARD=FILE."
+                                f"Invalid sample entry: {raw_value!r}. Expected DATASET=FILE or DAWN:HAZARD=FILE."
                         )
 
                 if ":" in left:
@@ -138,6 +144,19 @@ def parse_sample_overrides(raw_overrides: Sequence[str] | None) -> Dict[SampleKe
                         key = (left, None)
 
                 overrides[key] = sample_name
+
+        for raw_value in raw_overrides or []:
+                if not raw_value:
+                        continue
+                p = Path(raw_value)
+                # If argument is a filepath, read entries from it.
+                if p.exists() and p.is_file():
+                        for line in p.read_text(encoding="utf-8").splitlines():
+                                process_line(line)
+                        continue
+                # Otherwise treat arg as inline DATASET=FILE entry.
+                process_line(raw_value)
+
         return overrides
 
 

@@ -459,6 +459,48 @@ Outputs:
 - `Datasets/extracted/FoggyCityscape/manifests/extracted_pairs.csv`
 - `Datasets/extracted/FoggyCityscape/manifests/summary.json`
 
+### 3.7 `scripts/compare_panels.py`
+
+Purpose:
+
+- Build side-by-side contact-sheet panels from existing run visuals for report inclusion.
+- Combines `original`, `restored`, `original_detection`, and `restored_detection` into a 3-row × 4-column panel (rows = runs, cols = visual types).
+
+Inputs / assumptions:
+
+- Expects the standard visual layout under `outputs/<run>/visuals/...` described in section 2.7b.
+- Selects one shared filename per dataset (or per DAWN hazard) to build a representative panel.
+- Filenames must be present in each run's `original/` folder (shared across runs) for deterministic comparison.
+
+Key features:
+
+- Deterministic sampling via `--seed` (default `42`).
+- Explicit filename overrides via repeated `--sample` arguments, or a file of overrides (e.g., `samples.txt`).
+  - Inline override syntax: `DATASET=FILENAME` (for `RTTS` and `FoggyCityscape`) or `DAWN:HAZARD=FILENAME` (for DAWN hazards).
+  - File format: plain lines with `DATASET=FILENAME` or `DAWN:HAZARD=FILENAME`, comments allowed starting with `#`.
+- Writes panels into `figs/report_comparisons/by_dataset/...` and a manifest `figs/report_comparisons/panels.json`.
+
+CLI examples:
+
+```bash
+# Use deterministic random selection (default seed)
+python scripts/compare_panels.py
+
+# Override specific samples inline
+python scripts/compare_panels.py \
+  --sample RTTS=FogDr_Google_348.jpg \
+  --sample FoggyCityscape=aachen_000032_000019_leftImg8bit_foggy_beta_0.01.jpg \
+  --sample DAWN:dusttornado=dusttornado-020.jpg
+
+# Read overrides from a file (samples.txt)
+python scripts/compare_panels.py --sample samples.txt
+```
+
+Notes:
+
+- If an override filename is not shared across all runs, the script raises an error to avoid mismatched comparisons.
+- Use `--output-dir` to change where panels are written. Default: `figs/report_comparisons`.
+
 ## 4. Module-by-Module Guide (`pipeline/`)
 
 ### 4.1 `pipeline/common/`
