@@ -38,6 +38,42 @@ def write_metrics_report(output_dir: Path, report: Dict[str, Any]) -> Dict[str, 
                         "value": "",
                 },
                 {
+                        "category": "detection",
+                        "metric": "precision",
+                        "baseline": report.get("detection_aggregate", {})
+                        .get("baseline_precision", {})
+                        .get("mean"),
+                        "restored": report.get("detection_aggregate", {})
+                        .get("restored_precision", {})
+                        .get("mean"),
+                        "delta": None,
+                        "value": "",
+                },
+                {
+                        "category": "detection",
+                        "metric": "recall",
+                        "baseline": report.get("detection_aggregate", {})
+                        .get("baseline_recall", {})
+                        .get("mean"),
+                        "restored": report.get("detection_aggregate", {})
+                        .get("restored_recall", {})
+                        .get("mean"),
+                        "delta": None,
+                        "value": "",
+                },
+                {
+                        "category": "detection",
+                        "metric": "f1",
+                        "baseline": report.get("detection_aggregate", {})
+                        .get("baseline_f1", {})
+                        .get("mean"),
+                        "restored": report.get("detection_aggregate", {})
+                        .get("restored_f1", {})
+                        .get("mean"),
+                        "delta": None,
+                        "value": "",
+                },
+                {
                         "category": "quality",
                         "metric": "psnr",
                         "baseline": "",
@@ -69,6 +105,48 @@ def write_metrics_report(output_dir: Path, report: Dict[str, Any]) -> Dict[str, 
                 )
                 writer.writeheader()
                 writer.writerows(rows)
+
+        # append per-class AP rows if present
+        ap_base = report.get("baseline", {}).get("ap_per_class", {})
+        ap_rest = report.get("restored", {}).get("ap_per_class", {})
+        if ap_base or ap_rest:
+                with csv_path.open("a", encoding="utf-8", newline="") as handle:
+                        writer = csv.DictWriter(
+                                handle,
+                                fieldnames=[
+                                        "category",
+                                        "metric",
+                                        "baseline",
+                                        "restored",
+                                        "delta",
+                                        "value",
+                                ],
+                        )
+                        # no header; append rows for each class
+                        keys = sorted(
+                                {
+                                        int(k)
+                                        for k in list(ap_base.keys())
+                                        + list(ap_rest.keys())
+                                }
+                        )
+                        for k in keys:
+                                b = ap_base.get(str(k), ap_base.get(k, None))
+                                r = ap_rest.get(str(k), ap_rest.get(k, None))
+                                writer.writerow(
+                                        {
+                                                "category": "detection_ap",
+                                                "metric": f"ap_class_{k}",
+                                                "baseline": float(b)
+                                                if b is not None
+                                                else "",
+                                                "restored": float(r)
+                                                if r is not None
+                                                else "",
+                                                "delta": "",
+                                                "value": "",
+                                        }
+                                )
 
         return {
                 "json": str(json_path),

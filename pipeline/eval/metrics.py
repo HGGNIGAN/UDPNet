@@ -150,6 +150,8 @@ def compute_map(
 
         map_by_iou: Dict[str, float] = {}
 
+        # Also collect AP per class at the primary IoU threshold (first threshold)
+        ap_per_class: Dict[int, float] = {}
         for thr in iou_thresholds:
                 ap_values: List[float] = []
                 for cls_id in classes:
@@ -158,6 +160,11 @@ def compute_map(
                         )
                         if not np.isnan(ap):
                                 ap_values.append(ap)
+                        # record AP per class for the primary threshold
+                        if thr == iou_thresholds[0]:
+                                ap_per_class[int(cls_id)] = (
+                                        float(ap) if not np.isnan(ap) else 0.0
+                                )
                 map_by_iou[str(round(float(thr), 2))] = (
                         float(np.mean(ap_values)) if ap_values else 0.0
                 )
@@ -167,4 +174,5 @@ def compute_map(
                 "classes": classes,
                 "map_by_iou": map_by_iou,
                 "map": overall,
+                "ap_per_class": ap_per_class,
         }

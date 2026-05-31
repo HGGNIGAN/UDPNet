@@ -26,16 +26,24 @@ def _extract_dawn_hazard(text: str) -> str:
         return "unknown"
 
 
-def _draw_boxes(image_rgb: np.ndarray, pred_arr: np.ndarray) -> np.ndarray:
+def _draw_boxes(
+        image_rgb: np.ndarray, pred_arr: np.ndarray, id2name: dict | None = None
+) -> np.ndarray:
         canvas = image_rgb.copy()
         for row in pred_arr:
                 cls_id = int(row[0])
                 x1, y1, x2, y2 = [int(v) for v in row[1:5]]
                 conf = float(row[5])
+                label = (
+                        id2name.get(cls_id)
+                        if (id2name and cls_id in id2name)
+                        else f"c{cls_id}"
+                )
+                text = f"{label}:{conf:.2f}"
                 cv2.rectangle(canvas, (x1, y1), (x2, y2), (255, 80, 0), 2)
                 cv2.putText(
                         canvas,
-                        f"c{cls_id}:{conf:.2f}",
+                        text,
                         (x1, max(12, y1 - 4)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.45,
@@ -54,6 +62,7 @@ def save_separate_visuals(
         restored_rgb: np.ndarray,
         baseline_predictions: np.ndarray,
         restored_predictions: np.ndarray,
+        id2name_map: dict | None = None,
 ) -> None:
         """Save four separate images: original, restored, and dual detections.
 
@@ -72,8 +81,20 @@ def save_separate_visuals(
         rest_det_dir = base / "restored_detection"
 
         # Draw detections on original and restored
-        orig_det_vis = _draw_boxes(original_rgb, baseline_predictions)
-        rest_det_vis = _draw_boxes(restored_rgb, restored_predictions)
+        # resolve id2name for this dataset/hazard
+        local_id2name = None
+        if id2name_map and dataset in id2name_map:
+                local_id2name = id2name_map.get(dataset)
+        if (
+                dataset == "DAWN"
+                and id2name_map
+                and isinstance(id2name_map.get("DAWN"), dict)
+        ):
+                # DAWN may have nested hazard mappings; prefer dataset-level mapping if present
+                local_id2name = id2name_map.get("DAWN")
+
+        orig_det_vis = _draw_boxes(original_rgb, baseline_predictions, local_id2name)
+        rest_det_vis = _draw_boxes(restored_rgb, restored_predictions, local_id2name)
 
         # convert to BGR for cv2
         orig_bgr = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2BGR)
@@ -104,6 +125,7 @@ def save_visual_batch(
         restored_predictions: Sequence[np.ndarray],
         per_dataset_max: dict,
         per_dataset_saved: dict,
+        id2name_map: dict | None = None,
 ) -> tuple[int, dict]:
         """Save visuals per image into dataset-specific subdirs.
 
@@ -148,6 +170,7 @@ def save_visual_batch(
                                         restored_images[idx],
                                         baseline_predictions[idx],
                                         restored_predictions[idx],
+                                        id2name_map=id2name_map,
                                 )
                                 saved_for_dataset[hazard] = already + 1
                                 per_dataset_saved[dataset] = saved_for_dataset
@@ -173,6 +196,7 @@ def save_visual_batch(
                                         restored_images[idx],
                                         baseline_predictions[idx],
                                         restored_predictions[idx],
+                                        id2name_map=id2name_map,
                                 )
                                 per_dataset_saved[dataset] = already + 1
                                 saved += 1

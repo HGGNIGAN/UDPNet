@@ -17,6 +17,7 @@ from pipeline.eval.metrics import (
 )
 from pipeline.eval.report import write_metrics_report
 from pipeline.eval.visualize import save_visual_batch
+from pipeline.eval import label_io
 from pipeline.run.metrics_utils import compute_psnr, compute_ssim
 from pipeline.run.summary_utils import aggregate_dataset_means, summarize_scalar_series
 import pipeline.eval.metrics as eval_metrics
@@ -141,6 +142,15 @@ def evaluate_pipeline(
         detection_model = DetectionModelLoader(config).load()
         detection_kwargs = load_detection_inference_settings(config)
         detection_cfg = config.get("detection", {})
+
+        # Build id->name maps from config for visualization/label exports
+        id2name_map: dict = {}
+        datasets_cfg = config.get("datasets", {}).get("entries", {})
+        for name, cfg in datasets_cfg.items():
+                cm = cfg.get("class_map", {}) or {}
+                # class_map may be name->id. We want id->name
+                rev = {int(v): str(k) for k, v in dict(cm).items()}
+                id2name_map[name] = rev
 
         if dry_run:
                 # compute per-dataset sizes
@@ -291,6 +301,7 @@ def evaluate_pipeline(
                         restored_predictions=restored_pred_np,
                         per_dataset_max=per_dataset_max,
                         per_dataset_saved=per_dataset_saved,
+                        id2name_map=id2name_map,
                 )
                 visuals_saved += saved_count
 
@@ -301,12 +312,13 @@ def evaluate_pipeline(
                         orig = original_np[idx]
                         rest = restored_np[idx]
                         preds = restored_pred_np[idx]
+                        baseline_preds_img = baseline_pred_np[idx]
                         gt = batch["gt_xyxy"][idx]
 
                         psnr_val = float(compute_psnr(orig, rest))
                         ssim_val = float(compute_ssim(orig, rest))
 
-                        # per-image mean best iou
+                        # per-image mean best iou (restored predictions)
                         per_img_scores = []
                         if gt.shape[0] and preds.shape[0]:
                                 pred_boxes = preds[:, 1:5]
@@ -332,21 +344,213 @@ def evaluate_pipeline(
                                 else 0.0
                         )
 
+                        # compute per-image detection precision/recall/F1 for baseline and restored
+                        def _compute_prf(preds_arr, gts_arr, iou_thr=0.5):
+                                # preds_arr: Nx6, gts_arr: Mx5 ([cls,x1,y1,x2,y2])
+                                tp = 0
+                                fp = 0
+                                total_gt = (
+                                        int(gts_arr.shape[0])
+                                        if hasattr(gts_arr, "shape")
+                                        else 0
+                                )
+
+                                # group by class
+                                cls_set = set()
+                                try:
+                                        cls_set |= {
+                                                int(v) for v in gts_arr[:, 0].tolist()
+                                        }
+                                except Exception:
+                                        pass
+                                try:
+                                        cls_set |= {
+                                                int(v) for v in preds_arr[:, 0].tolist()
+                                        }
+                                except Exception:
+                                        pass
+
+                                for cls in cls_set:
+                                        gt_cls = gts_arr[
+                                                gts_arr[:, 0].astype(int) == int(cls)
+                                        ]
+                                        pred_cls = preds_arr[
+                                                preds_arr[:, 0].astype(int) == int(cls)
+                                        ]
+                                        if pred_cls.shape[0] == 0:
+                                                continue
+                                        # sort preds by confidence desc
+                                        order = np.argsort(-pred_cls[:, 5])
+                                        matched = (
+                                                np.zeros(gt_cls.shape[0], dtype=bool)
+                                                if gt_cls.shape[0] > 0
+                                                else np.array([], dtype=bool)
+                                        )
+                                        for pi in order:
+                                                pbox = pred_cls[pi, 1:5]
+                                                if gt_cls.shape[0] == 0:
+                                                        fp += 1
+                                                        continue
+                                                ious = np.array(
+                                                        [
+                                                                eval_metrics.box_iou_xyxy(
+                                                                        pbox, g[1:5]
+                                                                )
+                                                                for g in gt_cls
+                                                        ],
+                                                        dtype=np.float32,
+                                                )
+                                                best_idx = int(np.argmax(ious))
+                                                if (
+                                                        ious[best_idx] >= iou_thr
+                                                        and not matched[best_idx]
+                                                ):
+                                                        tp += 1
+                                                        matched[best_idx] = True
+                                                else:
+                                                        fp += 1
+                                fn = total_gt - tp
+                                prec = float(tp) / (tp + fp) if (tp + fp) > 0 else 0.0
+                                rec = float(tp) / (tp + fn) if (tp + fn) > 0 else 0.0
+                                f1 = (
+                                        2.0 * prec * rec / (prec + rec)
+                                        if (prec + rec) > 0
+                                        else 0.0
+                                )
+                                return (
+                                        prec,
+                                        rec,
+                                        f1,
+                                        int(total_gt),
+                                        int(preds_arr.shape[0]),
+                                )
+
+                        (
+                                baseline_prec,
+                                baseline_rec,
+                                baseline_f1,
+                                num_gt_val,
+                                baseline_num_preds,
+                        ) = _compute_prf(
+                                baseline_preds_img
+                                if baseline_preds_img is not None
+                                else np.zeros((0, 6)),
+                                gt,
+                        )
+                        (
+                                rest_prec,
+                                rest_rec,
+                                rest_f1,
+                                _num_gt_val2,
+                                restored_num_preds,
+                        ) = _compute_prf(
+                                preds if preds is not None else np.zeros((0, 6)), gt
+                        )
+
                         per_dataset_rows[ds].append(
                                 {
                                         "image_id": img_id,
                                         "image_path": batch["image_path"][idx],
+                                        # restoration quality
                                         "psnr": psnr_val,
                                         "ssim": ssim_val,
-                                        "mean_iou": mean_iou_img,
-                                        "num_gt": int(gt.shape[0])
-                                        if hasattr(gt, "shape")
-                                        else 0,
-                                        "num_preds": int(preds.shape[0])
-                                        if hasattr(preds, "shape")
-                                        else 0,
+                                        # counts
+                                        "num_gt": int(num_gt_val),
+                                        "baseline_num_preds": int(baseline_num_preds),
+                                        "restored_num_preds": int(restored_num_preds),
+                                        # detection quality
+                                        "baseline_mean_iou": 0.0,
+                                        "baseline_precision": float(baseline_prec),
+                                        "baseline_recall": float(baseline_rec),
+                                        "baseline_f1": float(baseline_f1),
+                                        "restored_mean_iou": float(mean_iou_img),
+                                        # keep legacy key for compatibility
+                                        "mean_iou": float(mean_iou_img),
+                                        "restored_precision": float(rest_prec),
+                                        "restored_recall": float(rest_rec),
+                                        "restored_f1": float(rest_f1),
                                 }
                         )
+
+                        # Export labels for both baseline and restored predictions
+                        try:
+                                labels_root = run_dir / "labels"
+                                # YOLO txt
+                                # dataset-level folder (DAWN gets hazard added inside write paths below)
+                                hazard = (
+                                        _extract_dawn_hazard(img_id)
+                                        if ds == "DAWN"
+                                        else None
+                                )
+                                w = int(orig.shape[1])
+                                h = int(orig.shape[0])
+                                # yolo_txt original
+                                yolo_orig_path = labels_root / "yolo_txt" / ds
+                                if hazard:
+                                        yolo_orig_path = yolo_orig_path / hazard
+                                yolo_orig_path = (
+                                        yolo_orig_path / "original" / f"{img_id}.txt"
+                                )
+                                label_io.write_yolo_txt(
+                                        baseline_preds_img
+                                        if baseline_preds_img is not None
+                                        else np.zeros((0, 6)),
+                                        (w, h),
+                                        yolo_orig_path,
+                                )
+                                # yolo_txt restored
+                                yolo_rest_path = labels_root / "yolo_txt" / ds
+                                if hazard:
+                                        yolo_rest_path = yolo_rest_path / hazard
+                                yolo_rest_path = (
+                                        yolo_rest_path / "restored" / f"{img_id}.txt"
+                                )
+                                label_io.write_yolo_txt(
+                                        preds
+                                        if preds is not None
+                                        else np.zeros((0, 6)),
+                                        (w, h),
+                                        yolo_rest_path,
+                                )
+
+                                # VOC xml original
+                                voc_orig_path = labels_root / "voc_xml" / ds
+                                if hazard:
+                                        voc_orig_path = voc_orig_path / hazard
+                                voc_orig_path = (
+                                        voc_orig_path / "original" / f"{img_id}.xml"
+                                )
+                                label_io.write_voc_xml(
+                                        baseline_preds_img
+                                        if baseline_preds_img is not None
+                                        else np.zeros((0, 6)),
+                                        (w, h),
+                                        voc_orig_path,
+                                        f"{img_id}.jpg",
+                                        folder=ds,
+                                        id2name=id2name_map.get(ds),
+                                )
+
+                                # VOC xml restored
+                                voc_rest_path = labels_root / "voc_xml" / ds
+                                if hazard:
+                                        voc_rest_path = voc_rest_path / hazard
+                                voc_rest_path = (
+                                        voc_rest_path / "restored" / f"{img_id}.xml"
+                                )
+                                label_io.write_voc_xml(
+                                        preds
+                                        if preds is not None
+                                        else np.zeros((0, 6)),
+                                        (w, h),
+                                        voc_rest_path,
+                                        f"{img_id}.jpg",
+                                        folder=ds,
+                                        id2name=id2name_map.get(ds),
+                                )
+                        except Exception:
+                                # don't fail the whole run for label export errors
+                                pass
 
                 processed += len(gt_batch)
 
@@ -522,7 +726,75 @@ def evaluate_pipeline(
                                         for r in hrows:
                                                 writer.writerow(r)
 
-                                # summary
+                                        # build per-hazard detection collections for mAP
+                                        # match by positional order between rows and per_dataset_collections["DAWN"] entries
+                                        gts_for_h = []
+                                        baseline_for_h = []
+                                        restored_for_h = []
+                                        # We assume per_dataset_collections[ds] items are in same order as rows
+                                        all_rows = [r["image_id"] for r in rows]
+                                        # map image_id -> index in rows
+                                        id_to_idx = {
+                                                rid: idx
+                                                for idx, rid in enumerate(all_rows)
+                                        }
+                                        dataset_gts = per_dataset_collections.get(
+                                                "DAWN", {}
+                                        ).get("gts", [])
+                                        dataset_baseline_preds = (
+                                                per_dataset_collections.get(
+                                                        "DAWN", {}
+                                                ).get("baseline", [])
+                                        )
+                                        dataset_restored_preds = (
+                                                per_dataset_collections.get(
+                                                        "DAWN", {}
+                                                ).get("restored", [])
+                                        )
+                                        for r in hrows:
+                                                iid = r.get("image_id")
+                                                if iid in id_to_idx:
+                                                        idx = id_to_idx[iid]
+                                                        if idx < len(dataset_gts):
+                                                                gts_for_h.append(
+                                                                        dataset_gts[idx]
+                                                                )
+                                                                baseline_for_h.append(
+                                                                        dataset_baseline_preds[
+                                                                                idx
+                                                                        ]
+                                                                )
+                                                                restored_for_h.append(
+                                                                        dataset_restored_preds[
+                                                                                idx
+                                                                        ]
+                                                                )
+
+                                        # compute maps for this hazard
+                                        try:
+                                                h_baseline_map = compute_map(
+                                                        baseline_for_h,
+                                                        gts_for_h,
+                                                        thresholds,
+                                                )
+                                                h_restored_map = compute_map(
+                                                        restored_for_h,
+                                                        gts_for_h,
+                                                        thresholds,
+                                                )
+                                        except Exception:
+                                                h_baseline_map = {
+                                                        "map": 0.0,
+                                                        "map_by_iou": {},
+                                                        "ap_per_class": {},
+                                                }
+                                                h_restored_map = {
+                                                        "map": 0.0,
+                                                        "map_by_iou": {},
+                                                        "ap_per_class": {},
+                                                }
+
+                                        # summary
                                 def _agg_h(field: str):
                                         vals = [
                                                 float(rr[field])
@@ -544,7 +816,21 @@ def evaluate_pipeline(
                                 h_summary = {
                                         "psnr": _agg_h("psnr"),
                                         "ssim": _agg_h("ssim"),
-                                        "mean_iou": _agg_h("mean_iou"),
+                                        "restored_mean_iou": _agg_h(
+                                                "restored_mean_iou"
+                                        ),
+                                        "baseline_precision": _agg_h(
+                                                "baseline_precision"
+                                        ),
+                                        "baseline_recall": _agg_h("baseline_recall"),
+                                        "baseline_f1": _agg_h("baseline_f1"),
+                                        "restored_precision": _agg_h(
+                                                "restored_precision"
+                                        ),
+                                        "restored_recall": _agg_h("restored_recall"),
+                                        "restored_f1": _agg_h("restored_f1"),
+                                        "baseline_map": h_baseline_map,
+                                        "restored_map": h_restored_map,
                                 }
                                 with (dawn_dir / f"{h}_summary.json").open(
                                         "w", encoding="utf-8"
@@ -567,7 +853,16 @@ def evaluate_pipeline(
                 summary = {
                         "psnr": _agg("psnr"),
                         "ssim": _agg("ssim"),
-                        "mean_iou": _agg("mean_iou"),
+                        "restored_mean_iou": _agg("restored_mean_iou")
+                        if rows
+                        and any(r.get("restored_mean_iou") is not None for r in rows)
+                        else _agg("mean_iou"),
+                        "baseline_precision": _agg("baseline_precision"),
+                        "baseline_recall": _agg("baseline_recall"),
+                        "baseline_f1": _agg("baseline_f1"),
+                        "restored_precision": _agg("restored_precision"),
+                        "restored_recall": _agg("restored_recall"),
+                        "restored_f1": _agg("restored_f1"),
                         "baseline": dataset_summaries.get(ds, {}).get("baseline", {}),
                         "restored": dataset_summaries.get(ds, {}).get("restored", {}),
                         "improvement": dataset_summaries.get(ds, {}).get(
@@ -585,6 +880,143 @@ def evaluate_pipeline(
         with overall_path.open("w", encoding="utf-8") as handle:
                 json.dump(all_summary, handle, indent=2)
 
+        # Aggregate detection precision/recall/F1 across all datasets
+        all_rows = []
+        for rows in per_dataset_rows.values():
+                all_rows.extend(rows)
+
+        def _agg_list(field: str):
+                vals = [float(r[field]) for r in all_rows if r.get(field) is not None]
+                if not vals:
+                        return {"mean": None, "std": None, "count": 0}
+                return {
+                        "mean": float(np.mean(vals)),
+                        "std": float(np.std(vals)),
+                        "count": len(vals),
+                }
+
+        detection_agg = {
+                "baseline_precision": _agg_list("baseline_precision"),
+                "baseline_recall": _agg_list("baseline_recall"),
+                "baseline_f1": _agg_list("baseline_f1"),
+                "restored_precision": _agg_list("restored_precision"),
+                "restored_recall": _agg_list("restored_recall"),
+                "restored_f1": _agg_list("restored_f1"),
+        }
+
+        # attach AP per class from full-run compute_map results
+        try:
+                report["baseline"]["ap_per_class"] = baseline_map_dict.get(
+                        "ap_per_class", {}
+                )
+                report["restored"]["ap_per_class"] = restored_map_dict.get(
+                        "ap_per_class", {}
+                )
+        except Exception:
+                pass
+
+        report["detection_aggregate"] = detection_agg
         report["metrics_dir"] = str(metrics_dir)
+
+        # Write per-hazard AP-by-class CSVs for DAWN
+        if "DAWN" in per_dataset_collections:
+                dawn_dir = metrics_dir / "DAWN"
+                for h in list(_DAWN_HAZARDS) + ["unknown"]:
+                        h_json = dawn_dir / f"{h}_summary.json"
+                        if not h_json.exists():
+                                continue
+                        # try load the JSON to get ap dicts
+                        try:
+                                with h_json.open("r", encoding="utf-8") as handle:
+                                        hsum = json.load(handle)
+                        except Exception:
+                                continue
+
+                        baseline_map_h = hsum.get("baseline_map", {}) or hsum.get(
+                                "baseline", {}
+                        )
+                        restored_map_h = hsum.get("restored_map", {}) or hsum.get(
+                                "restored", {}
+                        )
+                        # extract ap_per_class if present
+                        baseline_ap = (
+                                baseline_map_h.get("ap_per_class", {})
+                                if isinstance(baseline_map_h, dict)
+                                else {}
+                        )
+                        restored_ap = (
+                                restored_map_h.get("ap_per_class", {})
+                                if isinstance(restored_map_h, dict)
+                                else {}
+                        )
+
+                        if not baseline_ap and not restored_ap:
+                                continue
+
+                        ap_csv = dawn_dir / f"{h}_ap_by_class.csv"
+                        with ap_csv.open("w", encoding="utf-8", newline="") as handle:
+                                writer = csv.DictWriter(
+                                        handle,
+                                        fieldnames=[
+                                                "class_id",
+                                                "class_name",
+                                                "baseline_ap",
+                                                "restored_ap",
+                                        ],
+                                )
+                                writer.writeheader()
+                                # union of keys
+                                keys = sorted(
+                                        {
+                                                int(k)
+                                                for k in list(baseline_ap.keys())
+                                                + list(restored_ap.keys())
+                                        }
+                                )
+                                for k in keys:
+                                        name = None
+                                        # try resolve class name from config id2name_map
+                                        # use id2name_map if available
+                                        try:
+                                                name = id2name_map.get("DAWN", {}).get(
+                                                        int(k)
+                                                )
+                                        except Exception:
+                                                name = None
+                                        writer.writerow(
+                                                {
+                                                        "class_id": int(k),
+                                                        "class_name": name or "",
+                                                        "baseline_ap": float(
+                                                                baseline_ap.get(
+                                                                        str(k),
+                                                                        baseline_ap.get(
+                                                                                int(k),
+                                                                                0.0,
+                                                                        ),
+                                                                )
+                                                        )
+                                                        if baseline_ap
+                                                        else 0.0,
+                                                        "restored_ap": float(
+                                                                restored_ap.get(
+                                                                        str(k),
+                                                                        restored_ap.get(
+                                                                                int(k),
+                                                                                0.0,
+                                                                        ),
+                                                                )
+                                                        )
+                                                        if restored_ap
+                                                        else 0.0,
+                                                }
+                                        )
+
+        # rewrite the top-level metrics.json/metrics.csv with enriched report
+        try:
+                report_paths = write_metrics_report(run_dir, report)
+                report["report_files"] = report_paths
+        except Exception:
+                pass
 
         return report
