@@ -7,12 +7,13 @@ import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
+from pipeline.common.config import load_yaml_config
+from pipeline.depth.generate_depthmaps import generate_depthmaps_for_datasets
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
 
-from pipeline.common.config import load_yaml_config
-from pipeline.depth.generate_depthmaps import generate_depthmaps_for_datasets
 
 
 def parse_args() -> argparse.Namespace:

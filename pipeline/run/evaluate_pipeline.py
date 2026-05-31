@@ -14,11 +14,11 @@ from pipeline.eval.metrics import (
         compute_map,
         extract_predictions_from_ultralytics,
         mean_best_iou,
-        box_iou_xyxy,
 )
 from pipeline.eval.report import write_metrics_report
 from pipeline.eval.visualize import save_visual_batch
 from pipeline.run.metrics_utils import compute_psnr, compute_ssim
+from pipeline.run.summary_utils import aggregate_dataset_means, summarize_scalar_series
 import pipeline.eval.metrics as eval_metrics
 from collections import defaultdict
 import csv
@@ -186,17 +186,13 @@ def evaluate_pipeline(
         visuals_saved = 0
         per_dataset_saved = defaultdict(int)
         per_dataset_rows: dict = defaultdict(list)
+        per_dataset_collections: dict = defaultdict(
+                lambda: {"gts": [], "baseline": [], "restored": []}
+        )
 
         # build per-dataset max mapping
         default_max = 0
         per_dataset_max = {}
-        try:
-                records = getattr(dataset_for_loader, "records", None)
-                if records is None and hasattr(dataset_for_loader, "dataset"):
-                        records = dataset_for_loader.dataset.records
-                dataset_names = sorted({r["dataset"] for r in records})
-        except Exception:
-                dataset_names = []
 
         if isinstance(max_visuals_cfg, dict):
                 for k, v in max_visuals_cfg.items():
@@ -272,6 +268,18 @@ def evaluate_pipeline(
                 gt_collection.extend(gt_batch)
                 baseline_preds.extend(baseline_pred_np)
                 restored_preds.extend(restored_pred_np)
+
+                for idx in range(len(batch["image_id"])):
+                        dataset_name = batch["dataset"][idx]
+                        per_dataset_collections[dataset_name]["gts"].append(
+                                gt_batch[idx]
+                        )
+                        per_dataset_collections[dataset_name]["baseline"].append(
+                                baseline_pred_np[idx]
+                        )
+                        per_dataset_collections[dataset_name]["restored"].append(
+                                restored_pred_np[idx]
+                        )
 
                 saved_count, per_dataset_saved = save_visual_batch(
                         output_dir=visuals_dir,
@@ -351,6 +359,58 @@ def evaluate_pipeline(
         baseline_map = float(baseline_map_dict["map"])
         restored_map = float(restored_map_dict["map"])
 
+        dataset_summaries = {}
+        dataset_names = sorted(
+                set(per_dataset_rows.keys()) | set(per_dataset_collections.keys())
+        )
+        for ds in dataset_names:
+                rows = per_dataset_rows.get(ds, [])
+                dataset_gts = per_dataset_collections[ds]["gts"]
+                dataset_baseline_preds = per_dataset_collections[ds]["baseline"]
+                dataset_restored_preds = per_dataset_collections[ds]["restored"]
+
+                dataset_baseline_iou = mean_best_iou(
+                        dataset_baseline_preds, dataset_gts
+                )
+                dataset_restored_iou = mean_best_iou(
+                        dataset_restored_preds, dataset_gts
+                )
+                dataset_baseline_map_dict = compute_map(
+                        dataset_baseline_preds, dataset_gts, thresholds
+                )
+                dataset_restored_map_dict = compute_map(
+                        dataset_restored_preds, dataset_gts, thresholds
+                )
+
+                dataset_summaries[ds] = {
+                        "psnr": summarize_scalar_series([row["psnr"] for row in rows]),
+                        "ssim": summarize_scalar_series([row["ssim"] for row in rows]),
+                        "mean_iou": summarize_scalar_series(
+                                [row["mean_iou"] for row in rows]
+                        ),
+                        "baseline": {
+                                "mean_iou": dataset_baseline_iou,
+                                "map": float(dataset_baseline_map_dict["map"]),
+                                "map_by_iou": dataset_baseline_map_dict["map_by_iou"],
+                        },
+                        "restored": {
+                                "mean_iou": dataset_restored_iou,
+                                "map": float(dataset_restored_map_dict["map"]),
+                                "map_by_iou": dataset_restored_map_dict["map_by_iou"],
+                        },
+                        "improvement": {
+                                "mean_iou": dataset_restored_iou - dataset_baseline_iou,
+                                "map": float(dataset_restored_map_dict["map"])
+                                - float(dataset_baseline_map_dict["map"]),
+                        },
+                }
+
+        quality_summary = {
+                "psnr": aggregate_dataset_means(dataset_summaries, "psnr"),
+                "ssim": aggregate_dataset_means(dataset_summaries, "ssim"),
+                "aggregation": "dataset_mean_then_equal_average",
+        }
+
         report = {
                 "run_dir": str(run_dir),
                 "processed_images": processed,
@@ -387,6 +447,7 @@ def evaluate_pipeline(
                         "mean_iou": restored_iou - baseline_iou,
                         "map": restored_map - baseline_map,
                 },
+                "quality": quality_summary,
                 "visuals_saved": visuals_saved,
         }
 
@@ -397,7 +458,22 @@ def evaluate_pipeline(
         metrics_dir = run_dir / "metrics"
         metrics_dir.mkdir(parents=True, exist_ok=True)
 
-        all_summary = {}
+        all_summary = {"__overall__": {"quality": quality_summary}}
+        all_summary["__overall__"]["detection"] = {
+                "baseline": {
+                        "mean_iou": baseline_iou,
+                        "map": baseline_map,
+                },
+                "restored": {
+                        "mean_iou": restored_iou,
+                        "map": restored_map,
+                },
+                "improvement": {
+                        "mean_iou": restored_iou - baseline_iou,
+                        "map": restored_map - baseline_map,
+                },
+        }
+
         for ds, rows in per_dataset_rows.items():
                 ds_csv = metrics_dir / f"{ds}_per_image.csv"
                 ds_json = metrics_dir / f"{ds}_summary.json"
@@ -476,8 +552,6 @@ def evaluate_pipeline(
                                         json.dump(h_summary, handle, indent=2)
 
                 # compute summary stats
-                import math
-
                 def _agg(field: str):
                         vals = [
                                 float(r[field])
@@ -494,6 +568,11 @@ def evaluate_pipeline(
                         "psnr": _agg("psnr"),
                         "ssim": _agg("ssim"),
                         "mean_iou": _agg("mean_iou"),
+                        "baseline": dataset_summaries.get(ds, {}).get("baseline", {}),
+                        "restored": dataset_summaries.get(ds, {}).get("restored", {}),
+                        "improvement": dataset_summaries.get(ds, {}).get(
+                                "improvement", {}
+                        ),
                 }
 
                 with ds_json.open("w", encoding="utf-8") as handle:

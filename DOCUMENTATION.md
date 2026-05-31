@@ -424,6 +424,9 @@ Outputs:
   - `metrics.json`
   - `metrics.csv`
   - `visuals/*.jpg`
+  - `metrics/<dataset>_per_image.csv`
+  - `metrics/<dataset>_summary.json`
+  - `metrics/all_datasets_summary.json`
 
 If the target directory already exists, the evaluator creates the next available suffix such as `_2`, `_3`, and so on.
 
@@ -638,12 +641,14 @@ End-to-end workflow:
   - Accumulate per-image rows
 - Write per-dataset metrics:
   - `metrics/<dataset>_per_image.csv` — one row per image
-  - `metrics/<dataset>_summary.json` — aggregated stats (mean, std, min, max, count)
+  - `metrics/<dataset>_summary.json` — aggregated stats plus dataset-level baseline/restored/improvement detection metrics
 - For DAWN, additionally group by hazard:
   - `metrics/DAWN/<hazard>_per_image.csv`
   - `metrics/DAWN/<hazard>_summary.json`
 - Write global summary:
-  - `metrics/all_datasets_summary.json` — aggregated across all datasets
+  - `metrics/all_datasets_summary.json` — aggregated across all datasets, plus an `__overall__` run-level rollup
+- Compute run-level quality metrics:
+  - `quality.psnr` and `quality.ssim` are averaged from the dataset means first, then equally averaged across datasets
 - Compute and report overall baseline/restored metrics
 - Return summary dict with `processed_images`, `visuals_saved`, `metrics_dir`, etc.
 
@@ -756,6 +761,9 @@ Metrics content:
 **Summary JSON** (`<dataset>_summary.json`):
 
 - Aggregated statistics: `count`, `psnr_mean`, `psnr_std`, `psnr_min`, `psnr_max`, `ssim_mean`, `ssim_std`, `ssim_min`, `ssim_max`, `mean_iou_mean`, `mean_iou_std`, `mean_iou_min`, `mean_iou_max`
+- Detection comparisons: `baseline`, `restored`, `improvement`
+- `baseline` and `restored` now carry dataset-level mean IoU and mAP, plus `map_by_iou` for the per-threshold breakdown.
+- `improvement` stores the delta between restored and baseline for mean IoU and mAP.
 
 **DAWN per-hazard metrics** (`DAWN/<hazard>_per_image.csv` and `DAWN/<hazard>_summary.json`):
 
@@ -764,11 +772,12 @@ Metrics content:
 **All datasets summary** (`all_datasets_summary.json`):
 
 - Aggregated statistics across all evaluated datasets
+- Includes an `__overall__` section with the run-level quality summary and detection summary.
 
 **Legacy outputs** (preserved for compatibility):
 
-- `metrics.json` — Full metrics payload with `baseline.mean_iou`, `baseline.map`, `baseline.map_by_iou`, `restored.*`, `improvement.*`, detection config, `processed_images`, `visuals_saved`
-- `metrics.csv` — Compact table with baseline/restored/delta per-metric row
+- `metrics.json` — Full metrics payload with `baseline.mean_iou`, `baseline.map`, `baseline.map_by_iou`, `restored.*`, `improvement.*`, `quality.psnr`, `quality.ssim`, detection config, `processed_images`, `visuals_saved`
+- `metrics.csv` — Compact table with `category,metric,baseline,restored,delta,value`; detection rows fill the comparison columns, while quality rows use `value` for `psnr` and `ssim`
 
 ## 7. How to Improve Scorings
 

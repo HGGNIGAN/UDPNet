@@ -18,25 +18,54 @@ def write_metrics_report(output_dir: Path, report: Dict[str, Any]) -> Dict[str, 
         baseline = report["baseline"]
         restored = report["restored"]
         improvement = report["improvement"]
+        quality = report.get("quality", {})
 
         rows = [
                 {
+                        "category": "detection",
                         "metric": "mean_iou",
                         "baseline": baseline["mean_iou"],
                         "restored": restored["mean_iou"],
                         "delta": improvement["mean_iou"],
+                        "value": "",
                 },
                 {
+                        "category": "detection",
                         "metric": "map",
                         "baseline": baseline["map"],
                         "restored": restored["map"],
                         "delta": improvement["map"],
+                        "value": "",
+                },
+                {
+                        "category": "quality",
+                        "metric": "psnr",
+                        "baseline": "",
+                        "restored": "",
+                        "delta": "",
+                        "value": quality.get("psnr", {}).get("mean"),
+                },
+                {
+                        "category": "quality",
+                        "metric": "ssim",
+                        "baseline": "",
+                        "restored": "",
+                        "delta": "",
+                        "value": quality.get("ssim", {}).get("mean"),
                 },
         ]
 
         with csv_path.open("w", encoding="utf-8", newline="") as handle:
                 writer = csv.DictWriter(
-                        handle, fieldnames=["metric", "baseline", "restored", "delta"]
+                        handle,
+                        fieldnames=[
+                                "category",
+                                "metric",
+                                "baseline",
+                                "restored",
+                                "delta",
+                                "value",
+                        ],
                 )
                 writer.writeheader()
                 writer.writerows(rows)
