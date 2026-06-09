@@ -2,7 +2,7 @@ project:
     name: UDPNet
     colab_mode: false
     local_root: "."
-    colab_root: "/content/UDPNet"
+    colab_root: "/kaggle/working/UDPNet"
 
 runtime:
     device: "cuda:0"
@@ -14,7 +14,7 @@ runtime:
 
 vram:
     batch_size: 1
-    image_resolution: [1280, 1280]
+    image_resolution: [960, 960]
 
 paths:
     datasets_root: "Datasets"
@@ -32,7 +32,7 @@ restoration:
 
 detection:
     weights: "weights/yolo/yolov8n.pt"
-    imgsz: 1280
+    imgsz: 960
     conf_threshold: 0.25
     nms_iou_threshold: 0.70
     max_det: 300
@@ -78,7 +78,15 @@ datasets:
             include_filename_prefixes: ["haze", "foggy"]
             image_extensions: [".jpg", ".jpeg", ".png", ".bmp", ".webp"]
             label_extensions: [".txt"]
-            class_map: {}
+            # DAWN YOLO labels use non-COCO numeric ids. Remap them to COCO ids
+            # used by Ultralytics YOLO predictions.
+            class_map:
+                "1": 0 # person
+                "2": 1 # bicycle
+                "3": 2 # car
+                "4": 3 # motorcycle
+                "6": 5 # bus
+                "8": 7 # truck
 
         RTTS:
             annotation_format: "voc_xml"

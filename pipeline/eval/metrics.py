@@ -188,6 +188,8 @@ def _compute_ap_for_class(
 
         tp_cum = np.cumsum(tp)
         fp_cum = np.cumsum(fp)
+        if float(tp_cum[-1]) == 0.0:
+                return 0.0
         precision = tp_cum / np.maximum(tp_cum + fp_cum, 1e-9)
         recall = tp_cum / max(total_gt, 1)
 

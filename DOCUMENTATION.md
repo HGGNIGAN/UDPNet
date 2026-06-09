@@ -306,7 +306,7 @@ Score impact (high):
   - `root`, `image_dir`, `label_dir`
   - `split` and optional `split_file`
   - `image_extensions`, `label_extensions`
-  - `class_map` (required for class-name to id mapping in XML scenarios)
+  - `class_map` (maps class names or numeric label ids into detector class ids)
 
 FoggyCityscape handoff:
 

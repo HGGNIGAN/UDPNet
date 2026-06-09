@@ -22,10 +22,14 @@ def _to_int_class_id(token: str, class_map: Dict[str, int]) -> Optional[int]:
         if stripped == "":
                 return None
 
+        mapped = class_map.get(stripped)
+        if mapped is not None:
+                return mapped
+
         if stripped.lstrip("-").isdigit():
                 return int(stripped)
 
-        return class_map.get(stripped)
+        return None
 
 
 def _read_image_size(image_path: Path) -> Tuple[int, int]:
