@@ -46,6 +46,26 @@ def _read_split_ids(split_file: Path) -> List[str]:
         return values
 
 
+def _filter_index_by_prefix(
+        file_index: Dict[str, Path],
+        prefixes: Optional[Sequence[str]],
+) -> Dict[str, Path]:
+        if not prefixes:
+                return file_index
+
+        normalized_prefixes = tuple(
+                str(prefix).lower() for prefix in prefixes if str(prefix).strip()
+        )
+        if not normalized_prefixes:
+                return file_index
+
+        return {
+                image_id: path
+                for image_id, path in file_index.items()
+                if path.name.lower().startswith(normalized_prefixes)
+        }
+
+
 def _collect_pairs(
         image_index: Dict[str, Path],
         label_index: Dict[str, Path],
@@ -102,6 +122,9 @@ def _scan_common(
 
         image_index = _index_files_by_stem(image_dir, image_extensions)
         label_index = _index_files_by_stem(label_dir, label_extensions)
+        include_prefixes = dataset_cfg.get("include_filename_prefixes")
+        image_index = _filter_index_by_prefix(image_index, include_prefixes)
+        label_index = _filter_index_by_prefix(label_index, include_prefixes)
 
         paired_ids, missing_images, missing_labels = _collect_pairs(
                 image_index, label_index, split_ids
@@ -119,6 +142,7 @@ def _scan_common(
                 "paired_ids": paired_ids,
                 "missing_images": missing_images,
                 "missing_labels": missing_labels,
+                "include_filename_prefixes": list(include_prefixes or []),
                 "used_split_file": bool(split_ids is not None),
         }
 
@@ -321,6 +345,9 @@ def scan_and_pair_datasets(
                         "missing_labels_count": len(scan_data["missing_labels"]),
                         "missing_images_sample": scan_data["missing_images"][:20],
                         "missing_labels_sample": scan_data["missing_labels"][:20],
+                        "include_filename_prefixes": scan_data[
+                                "include_filename_prefixes"
+                        ],
                         "used_split_file": scan_data["used_split_file"],
                         "manifest_path": str(manifest_path),
                         "summary_path": str(summary_path),

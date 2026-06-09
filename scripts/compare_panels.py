@@ -21,15 +21,6 @@ DEFAULT_RUNS = [
         ("yolo26x", PROJECT_ROOT / "outputs" / "FSNet_UDPNet_OTS_yolo26x"),
 ]
 DEFAULT_DATASETS = ("RTTS", "FoggyCityscape", "DAWN")
-DEFAULT_HAZARDS = (
-        "dusttornado",
-        "foggy",
-        "haze",
-        "mist",
-        "rain_storm",
-        "sand_storm",
-        "snow_storm",
-)
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "figs" / "report_comparisons"
 PANEL_COLUMNS = ("original", "restored", "original_detection", "restored_detection")
 COLUMN_LABELS = {
@@ -43,7 +34,7 @@ RUN_LABELS = {
         "yolov8n": "yolov8n",
         "yolo26x": "yolo26x",
 }
-SampleKey = Tuple[str, str | None]
+SampleKey = str
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,7 +63,7 @@ def parse_args() -> argparse.Namespace:
                 "--sample",
                 action="append",
                 default=None,
-                help="Override a sample filename. Use DATASET=FILE for RTTS/FoggyCityscape or DAWN:HAZARD=FILE for DAWN hazards.",
+                help="Override a sample filename. Use DATASET=FILE.",
         )
         return parser.parse_args()
 
@@ -119,29 +110,21 @@ def parse_sample_overrides(raw_overrides: Sequence[str] | None) -> Dict[SampleKe
                         return
                 if "=" not in raw_value:
                         raise ValueError(
-                                f"Invalid sample entry: {raw_value!r}. Expected DATASET=FILE or DAWN:HAZARD=FILE."
+                                f"Invalid sample entry: {raw_value!r}. Expected DATASET=FILE."
                         )
                 left, sample_name = raw_value.split("=", 1)
                 left = left.strip()
                 sample_name = sample_name.strip()
                 if not left or not sample_name:
                         raise ValueError(
-                                f"Invalid sample entry: {raw_value!r}. Expected DATASET=FILE or DAWN:HAZARD=FILE."
+                                f"Invalid sample entry: {raw_value!r}. Expected DATASET=FILE."
                         )
 
                 if ":" in left:
-                        dataset, hazard = left.split(":", 1)
-                        if dataset != "DAWN" or not hazard:
-                                raise ValueError(
-                                        f"Invalid DAWN override: {raw_value!r}. Use DAWN:HAZARD=FILE."
-                                )
-                        key: SampleKey = (dataset, hazard)
-                else:
-                        if left == "DAWN":
-                                raise ValueError(
-                                        f"Invalid DAWN override: {raw_value!r}. Use DAWN:HAZARD=FILE."
-                                )
-                        key = (left, None)
+                        raise ValueError(
+                                f"Invalid sample entry: {raw_value!r}. Expected DATASET=FILE."
+                        )
+                key = left
 
                 overrides[key] = sample_name
 
@@ -160,15 +143,10 @@ def parse_sample_overrides(raw_overrides: Sequence[str] | None) -> Dict[SampleKe
         return overrides
 
 
-def collect_common_names(
-        run_dirs: Sequence[Tuple[str, Path]], dataset: str, hazard: str | None = None
-) -> List[str]:
+def collect_common_names(run_dirs: Sequence[Tuple[str, Path]], dataset: str) -> List[str]:
         common_names: set[str] | None = None
         for _, run_dir in run_dirs:
-                if hazard is None:
-                        folder = run_dir / "visuals" / dataset / "original"
-                else:
-                        folder = run_dir / "visuals" / dataset / hazard / "original"
+                folder = run_dir / "visuals" / dataset / "original"
                 names = set(list_image_names(folder))
                 if common_names is None:
                         common_names = names
@@ -182,7 +160,7 @@ def collect_common_names(
 def pick_sample(rng: random.Random, candidates: Sequence[str]) -> str:
         if not candidates:
                 raise ValueError(
-                        "No shared filenames available for this dataset or hazard."
+                        "No shared filenames available for this dataset."
                 )
         return rng.choice(list(candidates))
 
@@ -191,20 +169,18 @@ def resolve_sample_name(
         rng: random.Random,
         run_dirs: Sequence[Tuple[str, Path]],
         dataset: str,
-        hazard: str | None,
         overrides: Dict[SampleKey, str],
 ) -> str:
-        override = overrides.get((dataset, hazard))
+        override = overrides.get(dataset)
         if override is not None:
-                common_names = collect_common_names(run_dirs, dataset, hazard=hazard)
+                common_names = collect_common_names(run_dirs, dataset)
                 if override not in common_names:
-                        target = f"{dataset}/{hazard}" if hazard else dataset
                         raise ValueError(
-                                f"Override sample {override!r} is not shared across runs for {target}."
+                                f"Override sample {override!r} is not shared across runs for {dataset}."
                         )
                 return override
 
-        shared_names = collect_common_names(run_dirs, dataset, hazard=hazard)
+        shared_names = collect_common_names(run_dirs, dataset)
         return pick_sample(rng, shared_names)
 
 
@@ -242,7 +218,6 @@ def build_panel(
         dataset: str,
         sample_name: str,
         output_path: Path,
-        hazard: str | None = None,
 ) -> Dict[str, str]:
         cell_w = 420
         cell_h = 280
@@ -259,8 +234,6 @@ def build_panel(
         draw = ImageDraw.Draw(panel)
 
         title = f"{dataset} representative comparison"
-        if hazard:
-                title += f" - {hazard}"
         subtitle = f"Sample: {sample_name} | Rows: yolo26n, yolov8n, yolo26x | Columns: original, restored, original_detection, restored_detection"
         draw_text_center(draw, (pad, 10, width - pad, title_h - 28), title, TITLE_FONT)
         draw_text_center(
@@ -296,14 +269,6 @@ def build_panel(
                                 cell_box, radius=10, fill="white", outline="#d6dbe3"
                         )
                         image_folder = run_dir / "visuals" / dataset / column_name
-                        if hazard is not None:
-                                image_folder = (
-                                        run_dir
-                                        / "visuals"
-                                        / dataset
-                                        / hazard
-                                        / column_name
-                                )
                         image_path = image_folder / sample_name
                         if not image_path.exists():
                                 raise FileNotFoundError(f"Missing visual: {image_path}")
@@ -331,7 +296,6 @@ def build_panel(
         panel.save(output_path)
         return {
                 "dataset": dataset,
-                "hazard": hazard or "",
                 "sample_name": sample_name,
                 "output_path": str(output_path),
                 "rows": manifest_rows,
@@ -348,41 +312,16 @@ def generate_panels(
         records: List[Dict[str, str]] = []
 
         for dataset in DEFAULT_DATASETS:
-                if dataset != "DAWN":
-                        sample_name = resolve_sample_name(
-                                rng, run_dirs, dataset, None, sample_overrides
-                        )
-                        output_path = (
-                                output_dir
-                                / "by_dataset"
-                                / dataset
-                                / f"{dataset}_comparison.png"
-                        )
-                        records.append(
-                                build_panel(run_dirs, dataset, sample_name, output_path)
-                        )
-                        continue
-
-                for hazard in DEFAULT_HAZARDS:
-                        sample_name = resolve_sample_name(
-                                rng, run_dirs, dataset, hazard, sample_overrides
-                        )
-                        output_path = (
-                                output_dir
-                                / "by_dataset"
-                                / dataset
-                                / hazard
-                                / f"{dataset}_{hazard}_comparison.png"
-                        )
-                        records.append(
-                                build_panel(
-                                        run_dirs,
-                                        dataset,
-                                        sample_name,
-                                        output_path,
-                                        hazard=hazard,
-                                )
-                        )
+                sample_name = resolve_sample_name(
+                        rng, run_dirs, dataset, sample_overrides
+                )
+                output_path = (
+                        output_dir
+                        / "by_dataset"
+                        / dataset
+                        / f"{dataset}_comparison.png"
+                )
+                records.append(build_panel(run_dirs, dataset, sample_name, output_path))
 
         manifest_path = output_dir / "panels.json"
         manifest_path.parent.mkdir(parents=True, exist_ok=True)

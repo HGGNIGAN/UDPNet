@@ -13,7 +13,7 @@ runtime:
     seed: 42
 
 vram:
-    batch_size: 2
+    batch_size: 1
     image_resolution: [640, 640]
 
 paths:
@@ -31,7 +31,7 @@ restoration:
     strict_state_dict: false
 
 detection:
-    weights: "weights/yolo/yolo26n.pt"
+    weights: "weights/yolo/yolov8n.pt"
     conf_threshold: 0.25
     nms_iou_threshold: 0.70
     max_det: 300
@@ -68,6 +68,7 @@ datasets:
             image_dir: "images"
             label_dir: "labels"
             split: "all"
+            include_filename_prefixes: ["haze", "foggy"]
             image_extensions: [".jpg", ".jpeg", ".png", ".bmp", ".webp"]
             label_extensions: [".txt"]
             class_map: {}
@@ -86,14 +87,15 @@ datasets:
                 bicycle: 1
                 car: 2
                 motorbike: 3
-                bus: 4
+                motorcycle: 3
+                bus: 5
 
         FoggyCityscape:
             annotation_format: "voc_xml"
             root: "Datasets/FoggyCityscape"
             image_dir: "images"
             label_dir: "labels_raw"
-            split: "refined_trainval"
+            split: "val"
             image_extensions: [".png"]
             label_extensions: [".xml"]
             class_map:

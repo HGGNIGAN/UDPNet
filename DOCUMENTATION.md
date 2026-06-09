@@ -4,7 +4,7 @@ This document explains the complete two-stage pipeline in this repository:
 
 1. Stage 1: Image restoration (UDPNet-based dehazing with optional depth prior)
 2. Stage 2: Object detection (Ultralytics YOLO)
-3. Evaluation: Per-image metrics (PSNR, SSIM, IoU) + per-dataset aggregates (mAP, mean IoU) comparing baseline and restored
+3. Evaluation: Per-image metrics (PSNR, SSIM, mean_iou_tp50) + per-dataset aggregates (mAP, mean_iou_tp50) comparing baseline and restored
 
 It also explains every YAML config field, every script/module, the end-to-end run order, and how to improve scores.
 
@@ -19,7 +19,7 @@ The high-level flow is:
    - Load image + depth + normalized GT
    - Run restoration model (or bypass if disabled)
    - Run YOLO detection on both original and restored images
-   - Compute metrics (mean IoU and mAP)
+   - Compute metrics (`mean_iou_tp50`, secondary mean-best IoU, and mAP)
    - Save dual-detection visuals and per-image/per-dataset metrics
 
 Recommended script order:
@@ -37,7 +37,7 @@ FoggyCityscape uses one extra handoff step before the pipeline:
 4. `scripts/step3_generate_depthmaps.py`
 5. `scripts/step4_evaluate_pipeline.py`
 
-The extractor is standalone. It reads the raw FoggyCityscape dataset, selects a deterministic city-balanced subset, converts polygon JSON to VOC XML boxes, and writes a flat extracted tree under `Datasets/extracted/FoggyCityscape`. The main pipeline then consumes that extracted tree only.
+The extractor is standalone. It reads every raw FoggyCityscape `val/` foggy image, converts allowed object polygons to VOC XML boxes, drops images with no allowed objects, and writes a flat extracted tree under `Datasets/extracted/FoggyCityscape`. The main pipeline then consumes that extracted tree only.
 
 ## 2. Configuration File (`configs/pipeline.yaml`)
 
@@ -232,7 +232,7 @@ Score impact (very high):
 - `max_images`: limit number of evaluated samples (`0` means full dataset).
 - `max_visuals`: controls saved visual count. Can be:
   - Integer: applied per-dataset (e.g., `max_visuals: 100` saves up to 100 images per dataset)
-  - Dict: per-dataset or per-hazard mapping (e.g., `{DAWN: {foggy: 50, haze: 30}}`)
+  - Dict: per-dataset mapping (e.g., `{DAWN: 50, RTTS: 20}`)
   - `0`: unlimited (save all)
 - `map_iou_thresholds`: IoU thresholds used for mAP aggregation.
 
@@ -241,6 +241,7 @@ Score impact:
 - `map_iou_thresholds` directly defines reported `map` value.
 - `max_images` changes statistical stability of results (small sample variance can be large).
 - `metrics.use_multichannel_ssim`: boolean flag (default `false`) to compute SSIM on all channels vs. luminance only.
+- `mean_iou_tp50` is the primary IoU metric: class-matched true-positive detections at IoU >= 0.50, averaged by matched IoU.
 
 ### 2.7b Visual Output Structure
 
@@ -251,7 +252,7 @@ Evaluation saves four types of visuals per image:
 - **`original_detection/`**: YOLO predictions drawn on original images (baseline detection)
 - **`restored_detection/`**: YOLO predictions drawn on restored images (restored detection)
 
-Directory layout (non-DAWN datasets):
+Directory layout:
 
 ```
 outputs/<run>/visuals/<dataset>/
@@ -261,20 +262,7 @@ outputs/<run>/visuals/<dataset>/
 └── restored_detection/
 ```
 
-For DAWN dataset, additionally grouped by hazard type (automatically extracted from image filename):
-
-```
-outputs/<run>/visuals/DAWN/
-├── <hazard>/
-│   ├── original/
-│   ├── restored/
-│   ├── original_detection/
-│   └── restored_detection/
-```
-
-Where `<hazard>` is one of: `dusttornado`, `foggy`, `haze`, `mist`, `rain_storm`, `sand_storm`, `snow_storm`.
-
-When `max_visuals` is an integer for DAWN, it splits evenly across hazards (with remainder distributed to first hazards).
+DAWN uses the same layout as every other dataset. Its scanner may filter filenames to haze/fog prefixes, but evaluation does not create hazard subfolders.
 
 ### 2.8 `normalization`
 
@@ -307,7 +295,7 @@ FoggyCityscape handoff:
 
 - `scripts/extract_foggycityscape.py` writes the extracted sample tree to `Datasets/extracted/FoggyCityscape`.
 - The pipeline config should point `datasets.entries.FoggyCityscape.root` at that extracted tree.
-- The pipeline itself should not perform the city-balanced filtering or beta selection.
+- The pipeline itself should not perform city-balanced filtering or beta selection.
 
 Score impact (high):
 
@@ -319,18 +307,19 @@ Use this workflow when you only have the raw FoggyCityscape dataset and not this
 
 ```bash
 python scripts/extract_foggycityscape.py \
-    --source-root Datasets/FoggyCityscape \
+    --source-root Datasets/FoggyCityscape-raw \
     --output-root Datasets/extracted/FoggyCityscape \
-    --per-city 20
+    --split-filter val
 ```
 
 The extractor:
 
-- reads `leftImg8bit_foggy/<split>/<city>/` and `gtFine/<split>/<city>/`
+- reads `leftImg8bit_foggy/val/<city>/` and `gtFine/val/<city>/`
 - keeps only driving-object classes
 - converts polygon objects into VOC-style bounding boxes
-- chooses one beta variant per scene
-- keeps a deterministic subset per city
+- includes every fog beta variant present
+- optionally filters fog beta variants with `--fog-levels 0.01 0.02`
+- drops images with no allowed object boxes
 - writes `images/`, `labels_raw/`, and `manifests/`
 
 Then run the existing pipeline stages against `Datasets/extracted/FoggyCityscape`.
@@ -436,18 +425,15 @@ Purpose:
 
 - Standalone extractor for FoggyCityscape.
 - Converts Cityscapes polygon JSON into VOC XML bounding boxes.
-- Selects a deterministic, city-balanced partial subset.
-- Picks a single fog beta per scene.
+- Extracts all valid `val/` foggy images.
+- Includes every fog beta variant present.
+- Drops images with no allowed object boxes.
 
 CLI:
 
 - `--source-root`
 - `--output-root`
-- `--refined-list`
-- `--per-city`
-- `--seed`
-- `--preferred-beta`
-- `--beta-order`
+- `--fog-levels`
 - `--split-filter`
 - `--overwrite`
 - `--dry-run`
@@ -469,15 +455,15 @@ Purpose:
 Inputs / assumptions:
 
 - Expects the standard visual layout under `outputs/<run>/visuals/...` described in section 2.7b.
-- Selects one shared filename per dataset (or per DAWN hazard) to build a representative panel.
+- Selects one shared filename per dataset to build a representative panel.
 - Filenames must be present in each run's `original/` folder (shared across runs) for deterministic comparison.
 
 Key features:
 
 - Deterministic sampling via `--seed` (default `42`).
 - Explicit filename overrides via repeated `--sample` arguments, or a file of overrides (e.g., `samples.txt`).
-  - Inline override syntax: `DATASET=FILENAME` (for `RTTS` and `FoggyCityscape`) or `DAWN:HAZARD=FILENAME` (for DAWN hazards).
-  - File format: plain lines with `DATASET=FILENAME` or `DAWN:HAZARD=FILENAME`, comments allowed starting with `#`.
+  - Inline override syntax: `DATASET=FILENAME`.
+  - File format: plain lines with `DATASET=FILENAME`, comments allowed starting with `#`.
 - Writes panels into `figs/report_comparisons/by_dataset/...` and a manifest `figs/report_comparisons/panels.json`.
 
 CLI examples:
@@ -489,8 +475,7 @@ python scripts/compare_panels.py
 # Override specific samples inline
 python scripts/compare_panels.py \
   --sample RTTS=FogDr_Google_348.jpg \
-  --sample FoggyCityscape=aachen_000032_000019_leftImg8bit_foggy_beta_0.01.jpg \
-  --sample DAWN:dusttornado=dusttornado-020.jpg
+  --sample FoggyCityscape=aachen_000032_000019_leftImg8bit_foggy_beta_0.01.jpg
 
 # Read overrides from a file (samples.txt)
 python scripts/compare_panels.py --sample samples.txt
@@ -638,9 +623,9 @@ Visual output (4 separate image types per sample):
 - **`original_detection/`**: Baseline YOLO predictions drawn on original
 - **`restored_detection/`**: Restored YOLO predictions drawn on restored
 
-For DAWN dataset, visuals additionally grouped by hazard type (automatically extracted from filename).
+DAWN uses the same visual layout as other datasets.
 
-Supports per-dataset and per-hazard visual quotas via `max_visuals` config.
+Supports per-dataset visual quotas via `max_visuals` config.
 
 ### 4.10 `pipeline/run/metrics_utils.py`
 
@@ -679,14 +664,11 @@ End-to-end workflow:
     - PSNR, SSIM (restoration quality)
     - Mean best IoU (detection performance per image)
     - Num GT / Num predictions (detection counts)
-  - Save 4-type visuals with per-dataset/per-hazard quotas
+  - Save 4-type visuals with per-dataset quotas
   - Accumulate per-image rows
 - Write per-dataset metrics:
   - `metrics/<dataset>_per_image.csv` — one row per image
   - `metrics/<dataset>_summary.json` — aggregated stats plus dataset-level baseline/restored/improvement detection metrics
-- For DAWN, additionally group by hazard:
-  - `metrics/DAWN/<hazard>_per_image.csv`
-  - `metrics/DAWN/<hazard>_summary.json`
 - Write global summary:
   - `metrics/all_datasets_summary.json` — aggregated across all datasets, plus an `__overall__` run-level rollup
 - Compute run-level quality metrics:
@@ -774,20 +756,10 @@ outputs/<run_name>/
 │   │   ├── restored/
 │   │   ├── original_detection/
 │   │   └── restored_detection/
-│   │
-│   └── DAWN/
-│       └── <hazard>/
-│           ├── original/
-│           ├── restored/
-│           ├── original_detection/
-│           └── restored_detection/
 │
 └── metrics/
     ├── <dataset>_per_image.csv
     ├── <dataset>_summary.json
-    ├── DAWN/
-    │   ├── <hazard>_per_image.csv
-    │   └── <hazard>_summary.json
     ├── all_datasets_summary.json
     ├── metrics.json
     └── metrics.csv
@@ -797,19 +769,15 @@ Metrics content:
 
 **Per-image CSV** (`<dataset>_per_image.csv`):
 
-- Columns: `image_id`, `image_path`, `psnr`, `ssim`, `mean_iou`, `num_gt`, `num_preds`
+- Columns include: `image_id`, `image_path`, `psnr`, `ssim`, `mean_iou_tp50`, `baseline_mean_iou_tp50`, `restored_mean_iou_tp50`, secondary `mean_iou`, GT counts, and prediction counts
 - One row per image
 
 **Summary JSON** (`<dataset>_summary.json`):
 
-- Aggregated statistics: `count`, `psnr_mean`, `psnr_std`, `psnr_min`, `psnr_max`, `ssim_mean`, `ssim_std`, `ssim_min`, `ssim_max`, `mean_iou_mean`, `mean_iou_std`, `mean_iou_min`, `mean_iou_max`
+- Aggregated statistics include `psnr`, `ssim`, `mean_iou_tp50`, `mean_iou_tp50_mean`, and secondary mean-best IoU fields
 - Detection comparisons: `baseline`, `restored`, `improvement`
-- `baseline` and `restored` now carry dataset-level mean IoU and mAP, plus `map_by_iou` for the per-threshold breakdown.
-- `improvement` stores the delta between restored and baseline for mean IoU and mAP.
-
-**DAWN per-hazard metrics** (`DAWN/<hazard>_per_image.csv` and `DAWN/<hazard>_summary.json`):
-
-- Same structure as per-dataset metrics, one set per hazard type (`dusttornado`, `foggy`, `haze`, `mist`, `rain_storm`, `sand_storm`, `snow_storm`)
+- `baseline` and `restored` carry dataset-level `mean_iou_tp50`, secondary `mean_iou`, mAP, and `map_by_iou`.
+- `improvement` stores restored-minus-baseline deltas for `mean_iou_tp50`, secondary `mean_iou`, and mAP.
 
 **All datasets summary** (`all_datasets_summary.json`):
 
@@ -818,7 +786,7 @@ Metrics content:
 
 **Legacy outputs** (preserved for compatibility):
 
-- `metrics.json` — Full metrics payload with `baseline.mean_iou`, `baseline.map`, `baseline.map_by_iou`, `restored.*`, `improvement.*`, `quality.psnr`, `quality.ssim`, detection config, `processed_images`, `visuals_saved`
+- `metrics.json` — Full metrics payload with `baseline.mean_iou_tp50`, `baseline.mean_iou`, `baseline.map`, `baseline.map_by_iou`, `restored.*`, `improvement.*`, `quality.psnr`, `quality.ssim`, detection config, `processed_images`, `visuals_saved`
 - `metrics.csv` — Compact table with `category,metric,baseline,restored,delta,value`; detection rows fill the comparison columns, while quality rows use `value` for `psnr` and `ssim`
 
 ## 7. How to Improve Scorings

@@ -64,6 +64,46 @@ def mean_best_iou(preds: Sequence[np.ndarray], gts: Sequence[np.ndarray]) -> flo
         return float(np.mean(scores)) if scores else 0.0
 
 
+def mean_iou_tp50(preds: Sequence[np.ndarray], gts: Sequence[np.ndarray]) -> float:
+        scores: List[float] = []
+
+        for pred_arr, gt_arr in zip(preds, gts):
+                if gt_arr.shape[0] == 0 or pred_arr.shape[0] == 0:
+                        continue
+
+                class_ids = sorted(
+                        set(gt_arr[:, 0].astype(np.int32).tolist())
+                        | set(pred_arr[:, 0].astype(np.int32).tolist())
+                )
+
+                for cls_id in class_ids:
+                        gt_cls = gt_arr[gt_arr[:, 0].astype(np.int32) == cls_id]
+                        pred_cls = pred_arr[pred_arr[:, 0].astype(np.int32) == cls_id]
+                        if gt_cls.shape[0] == 0 or pred_cls.shape[0] == 0:
+                                continue
+
+                        order = np.argsort(-pred_cls[:, 5])
+                        matched_gt = np.zeros(gt_cls.shape[0], dtype=np.bool_)
+
+                        for pred_idx in order:
+                                pred_box = pred_cls[pred_idx, 1:5]
+                                ious = np.array(
+                                        [
+                                                box_iou_xyxy(pred_box, gt_row[1:5])
+                                                for gt_row in gt_cls
+                                        ],
+                                        dtype=np.float32,
+                                )
+                                best_idx = int(np.argmax(ious))
+                                best_iou = float(ious[best_idx])
+
+                                if best_iou >= 0.50 and not matched_gt[best_idx]:
+                                        matched_gt[best_idx] = True
+                                        scores.append(best_iou)
+
+        return float(np.mean(scores)) if scores else 0.0
+
+
 def _compute_ap_for_class(
         cls_id: int,
         preds_per_image: Sequence[np.ndarray],

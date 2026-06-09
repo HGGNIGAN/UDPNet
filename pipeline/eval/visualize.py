@@ -7,25 +7,6 @@ import cv2
 import numpy as np
 
 
-_DAWN_HAZARDS = (
-        "dusttornado",
-        "rain_storm",
-        "sand_storm",
-        "snow_storm",
-        "foggy",
-        "haze",
-        "mist",
-)
-
-
-def _extract_dawn_hazard(text: str) -> str:
-        normalized = (text or "").lower().replace("-", "_")
-        for hazard in _DAWN_HAZARDS:
-                if hazard in normalized:
-                        return hazard
-        return "unknown"
-
-
 def _draw_boxes(
         image_rgb: np.ndarray, pred_arr: np.ndarray, id2name: dict | None = None
 ) -> np.ndarray:
@@ -67,13 +48,9 @@ def save_separate_visuals(
         """Save four separate images: original, restored, and dual detections.
 
         Directory layout: <output_dir>/<dataset>/{original,restored,original_detection,restored_detection}/
-        For DAWN, also groups by hazard: <output_dir>/DAWN/{hazard}/{...}/
         Filenames: <image_id>.jpg
         """
-        # For DAWN, group by hazard token parsed from image_id (token before first underscore)
         base = output_dir / dataset
-        if dataset == "DAWN":
-                base = base / _extract_dawn_hazard(image_id)
 
         orig_dir = base / "original"
         rest_dir = base / "restored"
@@ -81,18 +58,10 @@ def save_separate_visuals(
         rest_det_dir = base / "restored_detection"
 
         # Draw detections on original and restored
-        # resolve id2name for this dataset/hazard
+        # resolve id2name for this dataset
         local_id2name = None
         if id2name_map and dataset in id2name_map:
                 local_id2name = id2name_map.get(dataset)
-        if (
-                dataset == "DAWN"
-                and id2name_map
-                and isinstance(id2name_map.get("DAWN"), dict)
-        ):
-                # DAWN may have nested hazard mappings; prefer dataset-level mapping if present
-                local_id2name = id2name_map.get("DAWN")
-
         orig_det_vis = _draw_boxes(original_rgb, baseline_predictions, local_id2name)
         rest_det_vis = _draw_boxes(restored_rgb, restored_predictions, local_id2name)
 
@@ -137,70 +106,29 @@ def save_visual_batch(
         for idx, image_id in enumerate(image_ids):
                 dataset = datasets[idx]
                 max_entry = per_dataset_max.get(dataset, 0)
-
-                # If max_entry is a dict, treat as per-hazard mapping
                 if isinstance(max_entry, dict):
-                        # hazard resolution
-                        hazard = (
-                                _extract_dawn_hazard(image_id)
-                                if dataset == "DAWN"
-                                else (
-                                        (image_id or "")
-                                        .split("_")[0]
-                                        .lower()
-                                        .replace("-", "_")
-                                )
-                        )
-                        max_for_hazard = int(max_entry.get(hazard, 0))
-
-                        saved_for_dataset = per_dataset_saved.get(dataset, {})
-                        if not isinstance(saved_for_dataset, dict):
-                                saved_for_dataset = {}
-                        already = int(saved_for_dataset.get(hazard, 0))
-
-                        if max_for_hazard > 0 and already >= max_for_hazard:
-                                continue
-
-                        try:
-                                save_separate_visuals(
-                                        output_dir,
-                                        dataset,
-                                        image_id,
-                                        original_images[idx],
-                                        restored_images[idx],
-                                        baseline_predictions[idx],
-                                        restored_predictions[idx],
-                                        id2name_map=id2name_map,
-                                )
-                                saved_for_dataset[hazard] = already + 1
-                                per_dataset_saved[dataset] = saved_for_dataset
-                                saved += 1
-                        except Exception:
-                                continue
+                        max_for_dataset = sum(int(v) for v in max_entry.values())
                 else:
-                        # scalar max per-dataset (0 means unlimited)
-                        try:
-                                max_for_dataset = int(max_entry)
-                        except Exception:
-                                max_for_dataset = 0
-                        already = int(per_dataset_saved.get(dataset, 0))
-                        if max_for_dataset > 0 and already >= max_for_dataset:
-                                continue
+                        max_for_dataset = int(max_entry)
 
-                        try:
-                                save_separate_visuals(
-                                        output_dir,
-                                        dataset,
-                                        image_id,
-                                        original_images[idx],
-                                        restored_images[idx],
-                                        baseline_predictions[idx],
-                                        restored_predictions[idx],
-                                        id2name_map=id2name_map,
-                                )
-                                per_dataset_saved[dataset] = already + 1
-                                saved += 1
-                        except Exception:
-                                continue
+                already = int(per_dataset_saved.get(dataset, 0))
+                if max_for_dataset > 0 and already >= max_for_dataset:
+                        continue
+
+                try:
+                        save_separate_visuals(
+                                output_dir,
+                                dataset,
+                                image_id,
+                                original_images[idx],
+                                restored_images[idx],
+                                baseline_predictions[idx],
+                                restored_predictions[idx],
+                                id2name_map=id2name_map,
+                        )
+                        per_dataset_saved[dataset] = already + 1
+                        saved += 1
+                except Exception:
+                        continue
 
         return saved, per_dataset_saved
