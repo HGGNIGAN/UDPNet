@@ -37,9 +37,12 @@ def load_detection_inference_settings(config: ConfigDict) -> Dict[str, Any]:
         vram_cfg = config.get("vram", {})
         runtime_cfg = config.get("runtime", {})
 
-        img_size = vram_cfg.get("image_resolution", [640, 640])
-        if isinstance(img_size, int):
-                img_size = [img_size, img_size]
+        img_size = detection_cfg.get("imgsz")
+        if img_size is None:
+                img_size = vram_cfg.get("image_resolution", [640, 640])
+                if isinstance(img_size, int):
+                        img_size = [img_size, img_size]
+                img_size = [int(img_size[1]), int(img_size[0])]
 
         device_name = resolve_detection_device_arg(runtime_cfg)
 
@@ -47,7 +50,9 @@ def load_detection_inference_settings(config: ConfigDict) -> Dict[str, Any]:
                 "conf": float(detection_cfg.get("conf_threshold", 0.25)),
                 "iou": float(detection_cfg.get("nms_iou_threshold", 0.7)),
                 "max_det": int(detection_cfg.get("max_det", 300)),
-                "imgsz": [int(img_size[1]), int(img_size[0])],
+                "imgsz": int(img_size)
+                if isinstance(img_size, int)
+                else [int(v) for v in img_size],
                 "device": device_name,
                 "verbose": False,
         }

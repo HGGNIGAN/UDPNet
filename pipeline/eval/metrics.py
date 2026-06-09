@@ -41,27 +41,55 @@ def extract_predictions_from_ultralytics(result_obj: Any) -> np.ndarray:
         return out
 
 
-def mean_best_iou(preds: Sequence[np.ndarray], gts: Sequence[np.ndarray]) -> float:
+def mean_iou_all_gt(preds: Sequence[np.ndarray], gts: Sequence[np.ndarray]) -> float:
         scores: List[float] = []
         for pred_arr, gt_arr in zip(preds, gts):
-                if gt_arr.shape[0] == 0 or pred_arr.shape[0] == 0:
+                if gt_arr.shape[0] == 0:
                         continue
 
-                pred_boxes = pred_arr[:, 1:5]
-                pred_cls = pred_arr[:, 0].astype(np.int32)
+                if pred_arr.shape[0] == 0:
+                        scores.extend([0.0] * int(gt_arr.shape[0]))
+                        continue
 
                 for gt in gt_arr:
                         gt_cls = int(gt[0])
                         gt_box = gt[1:5]
-                        matched = pred_boxes[pred_cls == gt_cls]
-                        if matched.shape[0] == 0:
-                                continue
+                        matched = pred_arr[
+                                pred_arr[:, 0].astype(np.int32) == gt_cls
+                        ][:, 1:5]
                         best = 0.0
                         for box in matched:
                                 best = max(best, box_iou_xyxy(gt_box, box))
                         scores.append(best)
 
         return float(np.mean(scores)) if scores else 0.0
+
+
+def mean_iou_matched(preds: Sequence[np.ndarray], gts: Sequence[np.ndarray]) -> float:
+        scores: List[float] = []
+        for pred_arr, gt_arr in zip(preds, gts):
+                if gt_arr.shape[0] == 0 or pred_arr.shape[0] == 0:
+                        continue
+
+                for gt in gt_arr:
+                        gt_cls = int(gt[0])
+                        gt_box = gt[1:5]
+                        matched = pred_arr[
+                                pred_arr[:, 0].astype(np.int32) == gt_cls
+                        ][:, 1:5]
+                        if matched.shape[0] == 0:
+                                continue
+                        best = 0.0
+                        for box in matched:
+                                best = max(best, box_iou_xyxy(gt_box, box))
+                        if best > 0.0:
+                                scores.append(best)
+
+        return float(np.mean(scores)) if scores else 0.0
+
+
+def mean_best_iou(preds: Sequence[np.ndarray], gts: Sequence[np.ndarray]) -> float:
+        return mean_iou_matched(preds, gts)
 
 
 def mean_iou_tp50(preds: Sequence[np.ndarray], gts: Sequence[np.ndarray]) -> float:
@@ -126,6 +154,8 @@ def _compute_ap_for_class(
 
         if total_gt == 0:
                 return np.nan
+        if not detections:
+                return 0.0
 
         detections.sort(key=lambda x: x[1], reverse=True)
 
@@ -178,14 +208,25 @@ def compute_map(
         preds_per_image: Sequence[np.ndarray],
         gts_per_image: Sequence[np.ndarray],
         iou_thresholds: Sequence[float],
+        class_set_mode: str = "gt_only",
 ) -> Dict[str, Any]:
-        classes = sorted({int(v) for arr in gts_per_image for v in arr[:, 0].tolist()})
+        class_set_mode = str(class_set_mode).lower()
+        gt_classes = {int(v) for arr in gts_per_image for v in arr[:, 0].tolist()}
+        pred_classes = {
+                int(v) for arr in preds_per_image for v in arr[:, 0].tolist()
+        }
+        if class_set_mode == "gt_union_pred":
+                classes = sorted(gt_classes | pred_classes)
+        else:
+                classes = sorted(gt_classes)
 
         if not classes:
                 return {
                         "classes": [],
                         "map_by_iou": {str(round(t, 2)): 0.0 for t in iou_thresholds},
                         "map": 0.0,
+                        "ap_per_class": {},
+                        "class_set_mode": class_set_mode,
                 }
 
         map_by_iou: Dict[str, float] = {}
@@ -198,6 +239,8 @@ def compute_map(
                         ap = _compute_ap_for_class(
                                 cls_id, preds_per_image, gts_per_image, float(thr)
                         )
+                        if np.isnan(ap) and class_set_mode == "gt_union_pred":
+                                ap = 0.0
                         if not np.isnan(ap):
                                 ap_values.append(ap)
                         # record AP per class for the primary threshold
@@ -215,4 +258,5 @@ def compute_map(
                 "map_by_iou": map_by_iou,
                 "map": overall,
                 "ap_per_class": ap_per_class,
+                "class_set_mode": class_set_mode,
         }

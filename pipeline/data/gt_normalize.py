@@ -43,7 +43,12 @@ def _convert_yolo_txt(
         skip_unknown_classes: bool,
 ) -> Tuple[List[str], Dict[str, int]]:
         converted_lines: List[str] = []
-        stats = {"unknown_class": 0, "invalid_box": 0, "empty_lines": 0}
+        stats = {
+                "unknown_class": 0,
+                "invalid_box": 0,
+                "empty_lines": 0,
+                "difficult": 0,
+        }
 
         with label_path.open("r", encoding="utf-8") as handle:
                 for raw in handle:
@@ -111,11 +116,21 @@ def _convert_voc_xml(
         skip_unknown_classes: bool,
 ) -> Tuple[List[str], Dict[str, int]]:
         converted_lines: List[str] = []
-        stats = {"unknown_class": 0, "invalid_box": 0, "empty_lines": 0}
+        stats = {
+                "unknown_class": 0,
+                "invalid_box": 0,
+                "empty_lines": 0,
+                "difficult": 0,
+        }
 
         root = ET.parse(label_path).getroot()
 
         for obj in root.findall("object"):
+                difficult = obj.findtext("difficult")
+                if difficult is not None and int((difficult.strip() or "0")) == 1:
+                        stats["difficult"] += 1
+                        continue
+
                 class_name = (obj.findtext("name") or "").strip()
                 class_id = _to_int_class_id(class_name, class_map)
                 if class_id is None:
@@ -259,6 +274,7 @@ def normalize_ground_truth(
                         "unknown_class": 0,
                         "invalid_box": 0,
                         "empty_lines": 0,
+                        "difficult": 0,
                         "images_processed": 0,
                         "labels_written": 0,
                         "annotations_written": 0,

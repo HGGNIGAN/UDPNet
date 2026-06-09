@@ -4,7 +4,7 @@ This document explains the complete two-stage pipeline in this repository:
 
 1. Stage 1: Image restoration (UDPNet-based dehazing with optional depth prior)
 2. Stage 2: Object detection (Ultralytics YOLO)
-3. Evaluation: Per-image metrics (PSNR, SSIM, mean_iou_tp50) + per-dataset aggregates (mAP, mean_iou_tp50) comparing baseline and restored
+3. Evaluation: Per-image metrics (PSNR, SSIM, explicit IoU metrics) + per-dataset aggregates (mAP, IoU) comparing baseline and restored
 
 It also explains every YAML config field, every script/module, the end-to-end run order, and how to improve scores.
 
@@ -17,9 +17,11 @@ The high-level flow is:
 3. Generate depth maps for organized images
 4. Run evaluation pipeline:
    - Load image + depth + normalized GT
+   - Run YOLO detection on original image file paths by default
    - Run restoration model (or bypass if disabled)
-   - Run YOLO detection on both original and restored images
-   - Compute metrics (`mean_iou_tp50`, secondary mean-best IoU, and mAP)
+   - Save restored images at original resolution
+   - Run YOLO detection on saved restored image file paths
+   - Compute metrics (`mean_iou_all_gt`, `mean_iou_matched`, `mean_iou_tp50`, and mAP)
    - Save dual-detection visuals and per-image/per-dataset metrics
 
 Recommended script order:
@@ -212,6 +214,7 @@ These have the same domain tag OTS, so there's less mismatch risk.
 ### 2.6 `detection`
 
 - `weights`: YOLO weights path.
+- `imgsz`: YOLO inference image size. File-path mode passes this directly to Ultralytics.
 - `conf_threshold`: Detection confidence filter.
 - `nms_iou_threshold`: NMS IoU threshold.
 - `max_det`: Max detections per image.
@@ -234,6 +237,12 @@ Score impact (very high):
   - Integer: applied per-dataset (e.g., `max_visuals: 100` saves up to 100 images per dataset)
   - Dict: per-dataset mapping (e.g., `{DAWN: 50, RTTS: 20}`)
   - `0`: unlimited (save all)
+- `detector_input_mode`: `file_path` (default final-report mode) or `tensor` (legacy fast mode).
+- `save_restored_full_resolution`: saves restored outputs resized back to original image dimensions. File-path mode forces this behavior so GT coordinates stay aligned.
+- `restored_image_format`: image extension for `restored_images/` artifacts, e.g. `png`.
+- `restore_output_interpolation`: resize interpolation for restored output (`lanczos`, `linear`, `cubic`, `area`, `nearest`).
+- `map_class_set`: `gt_only` or `gt_union_pred`. `gt_union_pred` matches the RTTS parity script.
+- `iou_primary`: primary IoU display choice: `all_gt`, `matched`, or `tp50`.
 - `map_iou_thresholds`: IoU thresholds used for mAP aggregation.
 
 Score impact:
@@ -241,7 +250,9 @@ Score impact:
 - `map_iou_thresholds` directly defines reported `map` value.
 - `max_images` changes statistical stability of results (small sample variance can be large).
 - `metrics.use_multichannel_ssim`: boolean flag (default `false`) to compute SSIM on all channels vs. luminance only.
-- `mean_iou_tp50` is the primary IoU metric: class-matched true-positive detections at IoU >= 0.50, averaged by matched IoU.
+- `mean_iou_all_gt`: one value per GT; unmatched GT contributes `0.0`.
+- `mean_iou_matched`: only GT boxes with best class-matched IoU > 0.
+- `mean_iou_tp50`: true-positive matches with IoU >= 0.50.
 
 ### 2.7b Visual Output Structure
 
@@ -260,6 +271,12 @@ outputs/<run>/visuals/<dataset>/
 ├── restored/
 ├── original_detection/
 └── restored_detection/
+```
+
+File-path mode also writes durable restored images:
+
+```
+outputs/<run>/restored_images/<dataset>/<image_id>.png
 ```
 
 DAWN uses the same layout as every other dataset. Its scanner may filter filenames to haze/fog prefixes, but evaluation does not create hazard subfolders.
@@ -406,10 +423,17 @@ CLI:
 - `--max-images`
 - `--run-name`
 - `--dry-run`
+- `--detector-input-mode file_path|tensor`
+- `--detection-imgsz 1280`
+- `--save-restored-full-resolution`
+- `--metrics-parity rtts_script`
 
 Outputs:
 
 - Under `outputs/<checkpoint_name>_<yolo_weight>/`:
+  - `restored_images/<dataset>/<image_id>.png`
+  - `labels/yolo_txt/<dataset>/{original,restored}/`
+  - `labels/voc_xml/<dataset>/{original,restored}/`
   - `metrics.json`
   - `metrics.csv`
   - `visuals/*.jpg`
@@ -543,14 +567,16 @@ Class:
 
 What it loads per sample:
 
-- RGB image from organized `images/`
+- Original image path and original image dimensions
+- RGB image from organized `images/` for restoration input
 - Depth map from organized `DepthMaps/` (falls back to zero map if missing)
 - YOLO normalized GT from `normalized_label_path`
+- GT boxes in original-resolution XYXY and restoration-resolution XYXY
 
 Transforms:
 
-- Resizes to `vram.image_resolution`
-- Converts GT YOLO boxes to absolute XYXY format for metric computation
+- Resizes restoration input to `vram.image_resolution`
+- Leaves detector file-path input at original resolution in `file_path` mode
 
 Collate helper:
 
@@ -601,13 +627,17 @@ Key functions:
 
 - `box_iou_xyxy(...)`
 - `extract_predictions_from_ultralytics(...)`
-- `mean_best_iou(...)`
+- `mean_iou_all_gt(...)`
+- `mean_iou_matched(...)`
+- `mean_iou_tp50(...)`
 - `compute_map(...)`
 
 Metric behavior:
 
-- `mean_best_iou`: average of best class-matched IoU per GT box.
-- `compute_map`: AP per class and IoU threshold (101-point interpolation), then mean across classes and thresholds.
+- `mean_iou_all_gt`: average best class-matched IoU for every GT, unmatched as zero.
+- `mean_iou_matched`: average best class-matched IoU for GT with overlap > 0.
+- `mean_iou_tp50`: average true-positive IoU for matches >= 0.50.
+- `compute_map`: AP per class and IoU threshold (101-point interpolation), then mean across classes and thresholds. `map_class_set` controls GT-only vs. GT + prediction classes.
 
 ### 4.9 `pipeline/eval/visualize.py`
 
@@ -658,11 +688,13 @@ End-to-end workflow:
 - Build dataset/dataloader
 - Load restoration and detection models
 - For each batch:
-  - Restore images (if `restoration.enabled`)
-  - Run YOLO on original and restored
+  - In `file_path` mode, run YOLO on original image paths
+  - Restore images (if `restoration.enabled`) and save restored full-resolution images
+  - Run YOLO on restored image paths
+  - In `tensor` mode, run YOLO on resized numpy arrays for backward compatibility
   - Collect predictions/GT and compute per-image metrics:
     - PSNR, SSIM (restoration quality)
-    - Mean best IoU (detection performance per image)
+    - IoU all-GT, matched IoU, TP50 IoU, AP50, precision/recall/F1
     - Num GT / Num predictions (detection counts)
   - Save 4-type visuals with per-dataset quotas
   - Accumulate per-image rows
@@ -750,6 +782,11 @@ Directory structure:
 
 ```
 outputs/<run_name>/
+├── restored_images/
+│   └── <dataset>/<image_id>.png
+├── labels/
+│   ├── yolo_txt/<dataset>/{original,restored}/
+│   └── voc_xml/<dataset>/{original,restored}/
 ├── visuals/
 │   ├── <dataset>/
 │   │   ├── original/
@@ -769,15 +806,16 @@ Metrics content:
 
 **Per-image CSV** (`<dataset>_per_image.csv`):
 
-- Columns include: `image_id`, `image_path`, `psnr`, `ssim`, `mean_iou_tp50`, `baseline_mean_iou_tp50`, `restored_mean_iou_tp50`, secondary `mean_iou`, GT counts, and prediction counts
+- Stable columns include: `dataset`, `image_id`, `image_path`, `restored_image_path`, `original_width`, `original_height`, `num_gt`, `num_pred_original`, `num_pred_restored`, `original_iou_all_gt`, `restored_iou_all_gt`, `original_iou_matched`, `restored_iou_matched`, `original_iou_tp50`, `restored_iou_tp50`, `original_ap50`, `restored_ap50`, `precision_original`, `recall_original`, `f1_original`, `precision_restored`, `recall_restored`, and `f1_restored`
+- Legacy aliases such as `baseline_mean_iou_tp50`, `restored_mean_iou_tp50`, and `mean_iou` remain for compatibility.
 - One row per image
 
 **Summary JSON** (`<dataset>_summary.json`):
 
-- Aggregated statistics include `psnr`, `ssim`, `mean_iou_tp50`, `mean_iou_tp50_mean`, and secondary mean-best IoU fields
+- Aggregated statistics include `psnr`, `ssim`, `mean_iou_tp50`, `mean_iou_tp50_mean`, and explicit IoU fields.
 - Detection comparisons: `baseline`, `restored`, `improvement`
-- `baseline` and `restored` carry dataset-level `mean_iou_tp50`, secondary `mean_iou`, mAP, and `map_by_iou`.
-- `improvement` stores restored-minus-baseline deltas for `mean_iou_tp50`, secondary `mean_iou`, and mAP.
+- `baseline` and `restored` carry dataset-level `iou` (`all_gt`, `matched`, `tp50`, `primary`), legacy `mean_iou`, mAP, `map_by_iou`, and `map_class_set`.
+- `improvement` stores restored-minus-baseline deltas for `iou_all_gt`, `iou_matched`, `iou_tp50`, legacy `mean_iou`, and mAP.
 
 **All datasets summary** (`all_datasets_summary.json`):
 
@@ -798,7 +836,7 @@ Below are practical tuning strategies mapped to observed output behavior.
 Actions:
 
 1. Upgrade `detection.weights` to stronger detector.
-2. Increase `vram.image_resolution` if memory allows.
+2. Increase `detection.imgsz` in file-path mode, or `vram.image_resolution` in tensor mode, if memory allows.
 3. Tune `detection.conf_threshold` and `detection.nms_iou_threshold`.
 4. Verify `datasets.entries.<name>.class_map` correctness.
 

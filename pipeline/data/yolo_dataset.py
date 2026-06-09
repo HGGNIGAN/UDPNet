@@ -100,7 +100,7 @@ class OrganizedYoloDataset(Dataset):
                         )
                         if not pairs_yolo.exists():
                                 raise FileNotFoundError(
-                                        f"YOLO-normalized pairs manifest missing: {pairs_yolo}. Run step4 first."
+                                        f"YOLO-normalized pairs manifest missing: {pairs_yolo}. Run step2 first."
                                 )
 
                         with pairs_yolo.open(
@@ -126,9 +126,10 @@ class OrganizedYoloDataset(Dataset):
                 image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
                 if image_bgr is None:
                         raise FileNotFoundError(f"Could not read image: {image_path}")
-                image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-                image_rgb = cv2.resize(
-                        image_rgb,
+                original_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+                original_h, original_w = original_rgb.shape[:2]
+                restore_rgb = cv2.resize(
+                        original_rgb,
                         (self.image_w, self.image_h),
                         interpolation=cv2.INTER_LINEAR,
                 )
@@ -148,12 +149,13 @@ class OrganizedYoloDataset(Dataset):
                         )
 
                 image_tensor = (
-                        torch.from_numpy(image_rgb).permute(2, 0, 1).float() / 255.0
+                        torch.from_numpy(restore_rgb).permute(2, 0, 1).float() / 255.0
                 )
                 depth_tensor = torch.from_numpy(depth_gray).unsqueeze(0).float() / 255.0
 
                 gt_yolo = _load_yolo_gt(norm_label_path)
-                gt_xyxy = _yolo_to_xyxy_abs(gt_yolo, self.image_w, self.image_h)
+                gt_xyxy_restore = _yolo_to_xyxy_abs(gt_yolo, self.image_w, self.image_h)
+                gt_xyxy_original = _yolo_to_xyxy_abs(gt_yolo, original_w, original_h)
 
                 return {
                         "dataset": dataset_name,
@@ -161,10 +163,18 @@ class OrganizedYoloDataset(Dataset):
                         "image_path": str(image_path),
                         "depth_path": str(depth_path),
                         "label_path": str(norm_label_path),
+                        "original_width": int(original_w),
+                        "original_height": int(original_h),
+                        "gt_yolo": gt_yolo,
+                        "restore_image_tensor": image_tensor,
+                        "restore_depth_tensor": depth_tensor,
                         "image_tensor": image_tensor,
                         "depth_tensor": depth_tensor,
-                        "image_rgb_uint8": image_rgb,
-                        "gt_xyxy": gt_xyxy,
+                        "image_rgb_uint8": restore_rgb,
+                        "original_image_rgb_uint8": original_rgb,
+                        "gt_xyxy": gt_xyxy_restore,
+                        "gt_xyxy_restore": gt_xyxy_restore,
+                        "gt_xyxy_original": gt_xyxy_original,
                 }
 
 
@@ -175,6 +185,15 @@ def collate_eval_batch(items: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "image_path": [item["image_path"] for item in items],
                 "depth_path": [item["depth_path"] for item in items],
                 "label_path": [item["label_path"] for item in items],
+                "original_width": [item["original_width"] for item in items],
+                "original_height": [item["original_height"] for item in items],
+                "gt_yolo": [item["gt_yolo"] for item in items],
+                "restore_image_tensor": torch.stack(
+                        [item["restore_image_tensor"] for item in items], dim=0
+                ),
+                "restore_depth_tensor": torch.stack(
+                        [item["restore_depth_tensor"] for item in items], dim=0
+                ),
                 "image_tensor": torch.stack(
                         [item["image_tensor"] for item in items], dim=0
                 ),
@@ -182,5 +201,10 @@ def collate_eval_batch(items: List[Dict[str, Any]]) -> Dict[str, Any]:
                         [item["depth_tensor"] for item in items], dim=0
                 ),
                 "image_rgb_uint8": [item["image_rgb_uint8"] for item in items],
+                "original_image_rgb_uint8": [
+                        item["original_image_rgb_uint8"] for item in items
+                ],
                 "gt_xyxy": [item["gt_xyxy"] for item in items],
+                "gt_xyxy_restore": [item["gt_xyxy_restore"] for item in items],
+                "gt_xyxy_original": [item["gt_xyxy_original"] for item in items],
         }

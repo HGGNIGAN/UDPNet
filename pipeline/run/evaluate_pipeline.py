@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+import cv2
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -13,7 +14,8 @@ from pipeline.data.yolo_dataset import OrganizedYoloDataset, collate_eval_batch
 from pipeline.eval.metrics import (
         compute_map,
         extract_predictions_from_ultralytics,
-        mean_best_iou,
+        mean_iou_all_gt,
+        mean_iou_matched,
         mean_iou_tp50,
 )
 from pipeline.eval.report import write_metrics_report
@@ -77,6 +79,79 @@ def _to_uint8_rgb(images_float: torch.Tensor) -> List[np.ndarray]:
         return [arr[idx] for idx in range(arr.shape[0])]
 
 
+def _cv2_interpolation(name: str) -> int:
+        key = str(name).lower()
+        if key == "nearest":
+                return cv2.INTER_NEAREST
+        if key == "area":
+                return cv2.INTER_AREA
+        if key == "cubic":
+                return cv2.INTER_CUBIC
+        if key == "lanczos":
+                return cv2.INTER_LANCZOS4
+        return cv2.INTER_LINEAR
+
+
+def save_restored_original_resolution(
+        restored_tensor: torch.Tensor,
+        original_size: tuple[int, int],
+        out_path: Path,
+        interpolation: str = "lanczos",
+) -> np.ndarray:
+        arr = restored_tensor.detach().cpu().permute(1, 2, 0).numpy()
+        rgb = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+        width, height = original_size
+        if rgb.shape[1] != width or rgb.shape[0] != height:
+                rgb = cv2.resize(
+                        rgb,
+                        (int(width), int(height)),
+                        interpolation=_cv2_interpolation(interpolation),
+                )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(str(out_path), bgr)
+        return rgb
+
+
+def _dataset_detection_imgsz(
+        config: ConfigDict, dataset_name: str, default_imgsz: Any
+) -> Any:
+        dataset_cfg = (
+                config.get("datasets", {})
+                .get("entries", {})
+                .get(dataset_name, {})
+        )
+        value = dataset_cfg.get("detection_imgsz")
+        if value is None:
+                value = config.get("detection", {}).get("imgsz", default_imgsz)
+        if isinstance(value, int):
+                return int(value)
+        if isinstance(value, (list, tuple)):
+                return [int(v) for v in value]
+        return int(value)
+
+
+def _metric_bundle(
+        preds: Sequence[np.ndarray], gts: Sequence[np.ndarray], primary: str
+) -> Dict[str, float | str]:
+        all_gt = mean_iou_all_gt(preds, gts)
+        matched = mean_iou_matched(preds, gts)
+        tp50 = mean_iou_tp50(preds, gts)
+        primary_key = str(primary).lower()
+        primary_value = {
+                "all_gt": all_gt,
+                "matched": matched,
+                "tp50": tp50,
+        }.get(primary_key, all_gt)
+        return {
+                "all_gt": all_gt,
+                "matched": matched,
+                "tp50": tp50,
+                "primary": primary_key if primary_key in {"all_gt", "matched", "tp50"} else "all_gt",
+                "primary_value": primary_value,
+        }
+
+
 def evaluate_pipeline(
         config: ConfigDict,
         selected_datasets: Optional[Sequence[str]] = None,
@@ -90,6 +165,25 @@ def evaluate_pipeline(
 
         batch_size = int(vram_cfg.get("batch_size", 1))
         num_workers = int(runtime_cfg.get("num_workers", 0))
+        detector_input_mode = str(
+                eval_cfg.get("detector_input_mode", "tensor")
+        ).lower()
+        if detector_input_mode not in {"file_path", "tensor"}:
+                raise ValueError(
+                        "evaluation.detector_input_mode must be 'file_path' or 'tensor'."
+                )
+        save_restored_full_resolution = bool(
+                eval_cfg.get("save_restored_full_resolution", True)
+        )
+        if detector_input_mode == "file_path":
+                save_restored_full_resolution = True
+        restored_image_format = str(eval_cfg.get("restored_image_format", "png"))
+        restored_image_format = restored_image_format.lstrip(".").lower() or "png"
+        restore_output_interpolation = str(
+                eval_cfg.get("restore_output_interpolation", "lanczos")
+        )
+        map_class_set = str(eval_cfg.get("map_class_set", "gt_only")).lower()
+        iou_primary = str(eval_cfg.get("iou_primary", "all_gt")).lower()
 
         run_dir = _prepare_output_dir(config, run_name)
 
@@ -124,6 +218,7 @@ def evaluate_pipeline(
         detection_model = DetectionModelLoader(config).load()
         detection_kwargs = load_detection_inference_settings(config)
         detection_cfg = config.get("detection", {})
+        restored_images_dir = run_dir / "restored_images"
 
         # Build id->name maps from config for visualization/label exports
         id2name_map: dict = {}
@@ -155,9 +250,12 @@ def evaluate_pipeline(
                         "effective_eval_size": max_images,
                         "batch_size": batch_size,
                         "restoration_enabled": restoration_runtime.enabled,
+                        "detector_input_mode": detector_input_mode,
+                        "save_restored_full_resolution": save_restored_full_resolution,
                         "detection_weights": str(
                                 detection_cfg.get("weights", "weights/yolo/yolo26n.pt")
                         ),
+                        "detection_imgsz": detection_kwargs.get("imgsz"),
                         "datasets": dataset_names,
                 }
 
@@ -199,8 +297,8 @@ def evaluate_pipeline(
                 if processed >= max_images:
                         break
 
-                images = batch["image_tensor"].to(restoration_runtime.device)
-                depths = batch["depth_tensor"].to(restoration_runtime.device)
+                images = batch["restore_image_tensor"].to(restoration_runtime.device)
+                depths = batch["restore_depth_tensor"].to(restoration_runtime.device)
 
                 remaining = max_images - processed
                 if images.shape[0] > remaining:
@@ -212,34 +310,110 @@ def evaluate_pipeline(
                                 "image_path",
                                 "depth_path",
                                 "label_path",
+                                "original_width",
+                                "original_height",
+                                "gt_yolo",
                                 "image_rgb_uint8",
+                                "original_image_rgb_uint8",
                                 "gt_xyxy",
+                                "gt_xyxy_restore",
+                                "gt_xyxy_original",
                         ):
                                 batch[key] = batch[key][:remaining]
 
                 with torch.no_grad():
                         restored_images = restoration_runtime.restore(images, depths)
 
-                original_np = _to_uint8_rgb(images)
-                restored_np = _to_uint8_rgb(restored_images)
+                restored_tensor_cpu = restored_images.detach().cpu()
+                restored_resized_np = _to_uint8_rgb(restored_images)
 
-                baseline_results = detection_model.predict(
-                        source=original_np, **detection_kwargs
+                restored_image_paths: List[str] = []
+                restored_full_np: List[np.ndarray] = []
+                for idx, img_id in enumerate(batch["image_id"]):
+                        ds = batch["dataset"][idx]
+                        out_path = (
+                                restored_images_dir
+                                / ds
+                                / f"{img_id}.{restored_image_format}"
+                        )
+                        if save_restored_full_resolution:
+                                restored_rgb = save_restored_original_resolution(
+                                        restored_tensor_cpu[idx],
+                                        (
+                                                int(batch["original_width"][idx]),
+                                                int(batch["original_height"][idx]),
+                                        ),
+                                        out_path,
+                                        restore_output_interpolation,
+                                )
+                        else:
+                                out_path.parent.mkdir(parents=True, exist_ok=True)
+                                restored_rgb = restored_resized_np[idx]
+                                cv2.imwrite(
+                                        str(out_path),
+                                        cv2.cvtColor(
+                                                restored_rgb, cv2.COLOR_RGB2BGR
+                                        ),
+                                )
+                        restored_image_paths.append(str(out_path))
+                        restored_full_np.append(restored_rgb)
+
+                if detector_input_mode == "file_path":
+                        original_np = list(batch["original_image_rgb_uint8"])
+                        restored_np = restored_full_np
+                        baseline_pred_np = []
+                        restored_pred_np = []
+                        for idx in range(len(batch["image_id"])):
+                                ds = batch["dataset"][idx]
+                                kwargs = dict(detection_kwargs)
+                                kwargs["imgsz"] = _dataset_detection_imgsz(
+                                        config, ds, detection_kwargs.get("imgsz")
+                                )
+                                baseline_results = detection_model.predict(
+                                        source=str(batch["image_path"][idx]), **kwargs
+                                )
+                                restored_results = detection_model.predict(
+                                        source=restored_image_paths[idx], **kwargs
+                                )
+                                baseline_pred_np.append(
+                                        extract_predictions_from_ultralytics(
+                                                baseline_results[0]
+                                        )
+                                        if baseline_results
+                                        else np.zeros((0, 6), dtype=np.float32)
+                                )
+                                restored_pred_np.append(
+                                        extract_predictions_from_ultralytics(
+                                                restored_results[0]
+                                        )
+                                        if restored_results
+                                        else np.zeros((0, 6), dtype=np.float32)
+                                )
+                else:
+                        original_np = _to_uint8_rgb(images)
+                        restored_np = restored_resized_np
+                        baseline_results = detection_model.predict(
+                                source=original_np, **detection_kwargs
+                        )
+                        restored_results = detection_model.predict(
+                                source=restored_np, **detection_kwargs
+                        )
+
+                        baseline_pred_np = [
+                                extract_predictions_from_ultralytics(r)
+                                for r in baseline_results
+                        ]
+                        restored_pred_np = [
+                                extract_predictions_from_ultralytics(r)
+                                for r in restored_results
+                        ]
+
+                gt_key = (
+                        "gt_xyxy_original"
+                        if detector_input_mode == "file_path"
+                        else "gt_xyxy_restore"
                 )
-                restored_results = detection_model.predict(
-                        source=restored_np, **detection_kwargs
-                )
-
-                baseline_pred_np = [
-                        extract_predictions_from_ultralytics(r)
-                        for r in baseline_results
-                ]
-                restored_pred_np = [
-                        extract_predictions_from_ultralytics(r)
-                        for r in restored_results
-                ]
-
-                gt_batch = [arr.astype(np.float32) for arr in batch["gt_xyxy"]]
+                gt_batch = [arr.astype(np.float32) for arr in batch[gt_key]]
 
                 gt_collection.extend(gt_batch)
                 baseline_preds.extend(baseline_pred_np)
@@ -279,41 +453,27 @@ def evaluate_pipeline(
                         rest = restored_np[idx]
                         preds = restored_pred_np[idx]
                         baseline_preds_img = baseline_pred_np[idx]
-                        gt = batch["gt_xyxy"][idx]
+                        gt = gt_batch[idx]
 
                         psnr_val = float(compute_psnr(orig, rest))
                         ssim_val = float(compute_ssim(orig, rest))
 
-                        def _per_image_mean_best_iou(preds_arr, gts_arr):
-                                scores = []
-                                if gts_arr.shape[0] and preds_arr.shape[0]:
-                                        pred_boxes = preds_arr[:, 1:5]
-                                        pred_cls = preds_arr[:, 0].astype(int)
-                                        for gt_row in gts_arr:
-                                                gt_cls = int(gt_row[0])
-                                                gt_box = gt_row[1:5]
-                                                matched = pred_boxes[pred_cls == gt_cls]
-                                                if matched.shape[0] == 0:
-                                                        continue
-                                                best = 0.0
-                                                for box in matched:
-                                                        best = max(
-                                                                best,
-                                                                eval_metrics.box_iou_xyxy(
-                                                                        gt_box, box
-                                                                ),
-                                                        )
-                                                scores.append(best)
-                                return float(np.mean(scores)) if scores else 0.0
-
-                        baseline_mean_iou_img = _per_image_mean_best_iou(
-                                baseline_preds_img, gt
+                        baseline_iou_img = _metric_bundle(
+                                [baseline_preds_img], [gt], iou_primary
                         )
-                        mean_iou_img = _per_image_mean_best_iou(preds, gt)
-                        baseline_mean_iou_tp50_img = mean_iou_tp50(
-                                [baseline_preds_img], [gt]
+                        restored_iou_img = _metric_bundle([preds], [gt], iou_primary)
+                        baseline_map50_img = compute_map(
+                                [baseline_preds_img],
+                                [gt],
+                                [0.50],
+                                class_set_mode=map_class_set,
                         )
-                        restored_mean_iou_tp50_img = mean_iou_tp50([preds], [gt])
+                        restored_map50_img = compute_map(
+                                [preds],
+                                [gt],
+                                [0.50],
+                                class_set_mode=map_class_set,
+                        )
 
                         # compute per-image detection precision/recall/F1 for baseline and restored
                         def _compute_prf(preds_arr, gts_arr, iou_thr=0.5):
@@ -420,34 +580,80 @@ def evaluate_pipeline(
 
                         per_dataset_rows[ds].append(
                                 {
+                                        "dataset": ds,
                                         "image_id": img_id,
                                         "image_path": batch["image_path"][idx],
-                                        # restoration quality
+                                        "restored_image_path": restored_image_paths[
+                                                idx
+                                        ],
+                                        "original_width": int(
+                                                batch["original_width"][idx]
+                                        ),
+                                        "original_height": int(
+                                                batch["original_height"][idx]
+                                        ),
+                                        "num_gt": int(num_gt_val),
+                                        "num_pred_original": int(baseline_num_preds),
+                                        "num_pred_restored": int(restored_num_preds),
+                                        "original_iou_all_gt": float(
+                                                baseline_iou_img["all_gt"]
+                                        ),
+                                        "restored_iou_all_gt": float(
+                                                restored_iou_img["all_gt"]
+                                        ),
+                                        "original_iou_matched": float(
+                                                baseline_iou_img["matched"]
+                                        ),
+                                        "restored_iou_matched": float(
+                                                restored_iou_img["matched"]
+                                        ),
+                                        "original_iou_tp50": float(
+                                                baseline_iou_img["tp50"]
+                                        ),
+                                        "restored_iou_tp50": float(
+                                                restored_iou_img["tp50"]
+                                        ),
+                                        "original_ap50": float(
+                                                baseline_map50_img["map_by_iou"][
+                                                        "0.5"
+                                                ]
+                                        ),
+                                        "restored_ap50": float(
+                                                restored_map50_img["map_by_iou"][
+                                                        "0.5"
+                                                ]
+                                        ),
+                                        "precision_original": float(baseline_prec),
+                                        "recall_original": float(baseline_rec),
+                                        "f1_original": float(baseline_f1),
+                                        "precision_restored": float(rest_prec),
+                                        "recall_restored": float(rest_rec),
+                                        "f1_restored": float(rest_f1),
                                         "psnr": psnr_val,
                                         "ssim": ssim_val,
-                                        # counts
-                                        "num_gt": int(num_gt_val),
                                         "baseline_num_preds": int(baseline_num_preds),
                                         "restored_num_preds": int(restored_num_preds),
-                                        # detection quality
                                         "baseline_mean_iou_tp50": float(
-                                                baseline_mean_iou_tp50_img
+                                                baseline_iou_img["tp50"]
                                         ),
                                         "restored_mean_iou_tp50": float(
-                                                restored_mean_iou_tp50_img
+                                                restored_iou_img["tp50"]
                                         ),
                                         "mean_iou_tp50": float(
-                                                restored_mean_iou_tp50_img
+                                                restored_iou_img["tp50"]
                                         ),
                                         "baseline_mean_iou": float(
-                                                baseline_mean_iou_img
+                                                baseline_iou_img["matched"]
                                         ),
                                         "baseline_precision": float(baseline_prec),
                                         "baseline_recall": float(baseline_rec),
                                         "baseline_f1": float(baseline_f1),
-                                        "restored_mean_iou": float(mean_iou_img),
-                                        # keep legacy key for compatibility
-                                        "mean_iou": float(mean_iou_img),
+                                        "restored_mean_iou": float(
+                                                restored_iou_img["matched"]
+                                        ),
+                                        "mean_iou": float(
+                                                restored_iou_img["matched"]
+                                        ),
                                         "restored_precision": float(rest_prec),
                                         "restored_recall": float(rest_rec),
                                         "restored_f1": float(rest_f1),
@@ -496,7 +702,7 @@ def evaluate_pipeline(
                                         else np.zeros((0, 6)),
                                         (w, h),
                                         voc_orig_path,
-                                        f"{img_id}.jpg",
+                                        Path(batch["image_path"][idx]).name,
                                         folder=ds,
                                         id2name=id2name_map.get(ds),
                                 )
@@ -512,7 +718,7 @@ def evaluate_pipeline(
                                         else np.zeros((0, 6)),
                                         (w, h),
                                         voc_rest_path,
-                                        f"{img_id}.jpg",
+                                        Path(restored_image_paths[idx]).name,
                                         folder=ds,
                                         id2name=id2name_map.get(ds),
                                 )
@@ -522,13 +728,23 @@ def evaluate_pipeline(
 
                 processed += len(gt_batch)
 
-        baseline_iou = mean_best_iou(baseline_preds, gt_collection)
-        restored_iou = mean_best_iou(restored_preds, gt_collection)
-        baseline_iou_tp50 = mean_iou_tp50(baseline_preds, gt_collection)
-        restored_iou_tp50 = mean_iou_tp50(restored_preds, gt_collection)
+        baseline_iou = _metric_bundle(baseline_preds, gt_collection, iou_primary)
+        restored_iou = _metric_bundle(restored_preds, gt_collection, iou_primary)
+        baseline_iou_tp50 = float(baseline_iou["tp50"])
+        restored_iou_tp50 = float(restored_iou["tp50"])
 
-        baseline_map_dict = compute_map(baseline_preds, gt_collection, thresholds)
-        restored_map_dict = compute_map(restored_preds, gt_collection, thresholds)
+        baseline_map_dict = compute_map(
+                baseline_preds,
+                gt_collection,
+                thresholds,
+                class_set_mode=map_class_set,
+        )
+        restored_map_dict = compute_map(
+                restored_preds,
+                gt_collection,
+                thresholds,
+                class_set_mode=map_class_set,
+        )
 
         baseline_map = float(baseline_map_dict["map"])
         restored_map = float(restored_map_dict["map"])
@@ -543,23 +759,25 @@ def evaluate_pipeline(
                 dataset_baseline_preds = per_dataset_collections[ds]["baseline"]
                 dataset_restored_preds = per_dataset_collections[ds]["restored"]
 
-                dataset_baseline_iou = mean_best_iou(
-                        dataset_baseline_preds, dataset_gts
+                dataset_baseline_iou = _metric_bundle(
+                        dataset_baseline_preds, dataset_gts, iou_primary
                 )
-                dataset_restored_iou = mean_best_iou(
-                        dataset_restored_preds, dataset_gts
+                dataset_restored_iou = _metric_bundle(
+                        dataset_restored_preds, dataset_gts, iou_primary
                 )
-                dataset_baseline_iou_tp50 = mean_iou_tp50(
-                        dataset_baseline_preds, dataset_gts
-                )
-                dataset_restored_iou_tp50 = mean_iou_tp50(
-                        dataset_restored_preds, dataset_gts
-                )
+                dataset_baseline_iou_tp50 = float(dataset_baseline_iou["tp50"])
+                dataset_restored_iou_tp50 = float(dataset_restored_iou["tp50"])
                 dataset_baseline_map_dict = compute_map(
-                        dataset_baseline_preds, dataset_gts, thresholds
+                        dataset_baseline_preds,
+                        dataset_gts,
+                        thresholds,
+                        class_set_mode=map_class_set,
                 )
                 dataset_restored_map_dict = compute_map(
-                        dataset_restored_preds, dataset_gts, thresholds
+                        dataset_restored_preds,
+                        dataset_gts,
+                        thresholds,
+                        class_set_mode=map_class_set,
                 )
 
                 dataset_summaries[ds] = {
@@ -573,20 +791,31 @@ def evaluate_pipeline(
                         ),
                         "baseline": {
                                 "mean_iou_tp50": dataset_baseline_iou_tp50,
-                                "mean_iou": dataset_baseline_iou,
+                                "mean_iou": float(dataset_baseline_iou["matched"]),
+                                "iou": dataset_baseline_iou,
                                 "map": float(dataset_baseline_map_dict["map"]),
                                 "map_by_iou": dataset_baseline_map_dict["map_by_iou"],
+                                "map_class_set": map_class_set,
                         },
                         "restored": {
                                 "mean_iou_tp50": dataset_restored_iou_tp50,
-                                "mean_iou": dataset_restored_iou,
+                                "mean_iou": float(dataset_restored_iou["matched"]),
+                                "iou": dataset_restored_iou,
                                 "map": float(dataset_restored_map_dict["map"]),
                                 "map_by_iou": dataset_restored_map_dict["map_by_iou"],
+                                "map_class_set": map_class_set,
                         },
                         "improvement": {
                                 "mean_iou_tp50": dataset_restored_iou_tp50
                                 - dataset_baseline_iou_tp50,
-                                "mean_iou": dataset_restored_iou - dataset_baseline_iou,
+                                "mean_iou": float(dataset_restored_iou["matched"])
+                                - float(dataset_baseline_iou["matched"]),
+                                "iou_all_gt": float(dataset_restored_iou["all_gt"])
+                                - float(dataset_baseline_iou["all_gt"]),
+                                "iou_matched": float(dataset_restored_iou["matched"])
+                                - float(dataset_baseline_iou["matched"]),
+                                "iou_tp50": float(dataset_restored_iou["tp50"])
+                                - float(dataset_baseline_iou["tp50"]),
                                 "map": float(dataset_restored_map_dict["map"])
                                 - float(dataset_baseline_map_dict["map"]),
                         },
@@ -606,10 +835,17 @@ def evaluate_pipeline(
                         "image_resolution", [640, 640]
                 ),
                 "run_name": run_name,
+                "detector_input_mode": detector_input_mode,
+                "save_restored_full_resolution": save_restored_full_resolution,
+                "restored_image_format": restored_image_format,
+                "restore_output_interpolation": restore_output_interpolation,
+                "map_class_set": map_class_set,
+                "iou_primary": iou_primary,
                 "detection": {
                         "weights": str(
                                 detection_cfg.get("weights", "weights/yolo/yolo26n.pt")
                         ),
+                        "imgsz": detection_kwargs.get("imgsz"),
                         "conf_threshold": float(
                                 detection_cfg.get("conf_threshold", 0.25)
                         ),
@@ -622,19 +858,30 @@ def evaluate_pipeline(
                 "map_iou_thresholds": thresholds,
                 "baseline": {
                         "mean_iou_tp50": baseline_iou_tp50,
-                        "mean_iou": baseline_iou,
+                        "mean_iou": float(baseline_iou["matched"]),
+                        "iou": baseline_iou,
                         "map": baseline_map,
                         "map_by_iou": baseline_map_dict["map_by_iou"],
+                        "map_class_set": map_class_set,
                 },
                 "restored": {
                         "mean_iou_tp50": restored_iou_tp50,
-                        "mean_iou": restored_iou,
+                        "mean_iou": float(restored_iou["matched"]),
+                        "iou": restored_iou,
                         "map": restored_map,
                         "map_by_iou": restored_map_dict["map_by_iou"],
+                        "map_class_set": map_class_set,
                 },
                 "improvement": {
                         "mean_iou_tp50": restored_iou_tp50 - baseline_iou_tp50,
-                        "mean_iou": restored_iou - baseline_iou,
+                        "mean_iou": float(restored_iou["matched"])
+                        - float(baseline_iou["matched"]),
+                        "iou_all_gt": float(restored_iou["all_gt"])
+                        - float(baseline_iou["all_gt"]),
+                        "iou_matched": float(restored_iou["matched"])
+                        - float(baseline_iou["matched"]),
+                        "iou_tp50": float(restored_iou["tp50"])
+                        - float(baseline_iou["tp50"]),
                         "map": restored_map - baseline_map,
                 },
                 "quality": quality_summary,
@@ -652,17 +899,28 @@ def evaluate_pipeline(
         all_summary["__overall__"]["detection"] = {
                 "baseline": {
                         "mean_iou_tp50": baseline_iou_tp50,
-                        "mean_iou": baseline_iou,
+                        "mean_iou": float(baseline_iou["matched"]),
+                        "iou": baseline_iou,
                         "map": baseline_map,
+                        "map_class_set": map_class_set,
                 },
                 "restored": {
                         "mean_iou_tp50": restored_iou_tp50,
-                        "mean_iou": restored_iou,
+                        "mean_iou": float(restored_iou["matched"]),
+                        "iou": restored_iou,
                         "map": restored_map,
+                        "map_class_set": map_class_set,
                 },
                 "improvement": {
                         "mean_iou_tp50": restored_iou_tp50 - baseline_iou_tp50,
-                        "mean_iou": restored_iou - baseline_iou,
+                        "mean_iou": float(restored_iou["matched"])
+                        - float(baseline_iou["matched"]),
+                        "iou_all_gt": float(restored_iou["all_gt"])
+                        - float(baseline_iou["all_gt"]),
+                        "iou_matched": float(restored_iou["matched"])
+                        - float(baseline_iou["matched"]),
+                        "iou_tp50": float(restored_iou["tp50"])
+                        - float(baseline_iou["tp50"]),
                         "map": restored_map - baseline_map,
                 },
         }

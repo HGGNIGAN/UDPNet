@@ -14,7 +14,7 @@ runtime:
 
 vram:
     batch_size: 1
-    image_resolution: [640, 640]
+    image_resolution: [1280, 1280]
 
 paths:
     datasets_root: "Datasets"
@@ -32,12 +32,19 @@ restoration:
 
 detection:
     weights: "weights/yolo/yolov8n.pt"
+    imgsz: 1280
     conf_threshold: 0.25
     nms_iou_threshold: 0.70
     max_det: 300
 
 evaluation:
     max_images: 0 # 0 = use all
+    detector_input_mode: "file_path" # file_path | tensor
+    save_restored_full_resolution: true
+    restored_image_format: "png"
+    restore_output_interpolation: "lanczos"
+    map_class_set: "gt_union_pred" # gt_only | gt_union_pred
+    iou_primary: "all_gt" # all_gt | matched | tp50
     # max_visuals may be an integer (applies per-dataset) or a mapping
     # e.g. max_visuals: { DAWN: 50, RTTS: 20 }
     max_visuals: 0

@@ -23,6 +23,22 @@ def write_metrics_report(output_dir: Path, report: Dict[str, Any]) -> Dict[str, 
         rows = [
                 {
                         "category": "detection",
+                        "metric": "iou_all_gt",
+                        "baseline": baseline.get("iou", {}).get("all_gt"),
+                        "restored": restored.get("iou", {}).get("all_gt"),
+                        "delta": improvement.get("iou_all_gt"),
+                        "value": "",
+                },
+                {
+                        "category": "detection",
+                        "metric": "iou_matched",
+                        "baseline": baseline.get("iou", {}).get("matched"),
+                        "restored": restored.get("iou", {}).get("matched"),
+                        "delta": improvement.get("iou_matched"),
+                        "value": "",
+                },
+                {
+                        "category": "detection",
                         "metric": "mean_iou_tp50",
                         "baseline": baseline.get("mean_iou_tp50", 0.0),
                         "restored": restored.get("mean_iou_tp50", 0.0),
