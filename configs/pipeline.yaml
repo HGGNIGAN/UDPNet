@@ -115,10 +115,10 @@ datasets:
             label_extensions: [".xml"]
             class_map:
                 person: 0
-                rider: 1
                 car: 2
-                truck: 3
-                bus: 4
-                train: 5
-                motorbike: 6
-                bicycle: 7
+                truck: 7
+                bus: 5
+                train: 6
+                motorbike: 3
+                motorcycle: 3
+                bicycle: 1
